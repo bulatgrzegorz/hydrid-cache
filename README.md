@@ -6,14 +6,58 @@ Every user belongs to one shard, which warms its cache the moment that user logs
 
 Each service narrates what it does over Redis pub/sub. The demo page plays the narration back step by step: a dot travels each hop, colored by what happened (hit, miss, ignored, rejected).
 
-## What you can see
+![The demo page drawing itself on load](docs/intro.gif)
 
-- **Login warms the owner's cache.** AuthService issues a JWT and publishes `UserLoggedIn` to a RabbitMQ fanout exchange.
-  Every account and order instance receives it, but only the owner (`md5(user) % shards`) loads the user's data into its cache.
-- **Reads go L1 → L2 → MongoDB.** A hit in memory needs no network call. A Redis hit is copied into memory. Only a double miss reaches the database.
-- **Writes keep every instance honest.** The write goes to MongoDB, then to L1 + L2. The backplane tells the other instances that the key changed, so they drop or refresh their stale L1 copy.
-- **Wrong shard.** Call a shard that doesn't own the user to see the cold path.
-- **No JWT.** Call before logging in to see the request rejected.
+## Walkthrough
+
+These are real recordings of the demo page's animation running against the app at 1× speed, with the controls and log left out.
+The app runs 2 shards, so there are 4 service instances:
+account-0, account-1, order-0 and order-1. The user is `ada`, and `md5("ada") % 2` makes **shard 0 her owner**.
+
+### 1. No token, no entry
+
+![A call without a JWT is rejected](docs/rejected.gif)
+
+Before logging in, **Get account** goes to account-0 without a JWT. The gRPC service rejects it with `Unauthenticated` (red),
+so the request never reaches the cache.
+
+### 2. Logging in warms the owner's cache
+
+![Logging in as ada: JWT, RabbitMQ fanout, and the owner shard warming its cache](docs/login.gif)
+
+1. AuthService issues a JWT and publishes `UserLoggedIn` to a RabbitMQ fanout exchange.
+   The page gets its token right away. The rest happens in the background.
+2. RabbitMQ delivers the message to all four instances, and each one checks who owns `ada`.
+   account-0 and order-0 own her, so they start warming their caches. account-1 and order-1 ignore the message (grey).
+3. The owners have never seen `ada`, so they miss in L1 (memory) and in L2 (Redis). They load her account and orders from MongoDB and save them to L1 + L2.
+4. Saving also sends a backplane message. The other instances hear it, but they hold no copy, so there's nothing to refresh.
+
+### 3. Owner shard: an L1 hit
+
+![Get account on the owner shard is answered from memory](docs/hit.gif)
+
+**Get account** goes to account-0, the owner. Login already put `ada` into its memory, so this is an L1 hit, answered
+without a single network hop. This is the path that sharding by user is built for.
+
+### 4. Wrong shard: the cold path
+
+![Get account on a shard that doesn't own the user goes to Redis](docs/wrong-shard.gif)
+
+The same call goes to account-1 this time. The orange request means it's not the owner. Its memory is empty, so L1 misses.
+Redis has the copy the owner saved at login, so L2 hits and the value is copied into account-1's memory.
+There's no database trip, but there is a network hop that the owner would have skipped.
+
+### 5. An update every instance hears
+
+![Update account: MongoDB, L1 + L2, then the backplane refreshes the stale copy on the other instance](docs/update.gif)
+
+**Update account** runs on the owner, account-0:
+
+1. It writes MongoDB first, the source of truth, and then L1 + L2.
+2. It publishes a backplane message saying `account:ada` changed.
+3. account-1 hears it. The wrong-shard read in step 4 left it holding a copy in L1, which is now stale, so it refreshes that copy from Redis.
+
+No instance serves the old value, and no instance had to go back to the database for the new one.
 
 ## Architecture
 
