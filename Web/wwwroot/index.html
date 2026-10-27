@@ -391,6 +391,7 @@
     const dot = el('circle', { r: 7, fill: c }, $('dots'));
     return gsap.to(dot, {
       duration: 1, // same duration and ease as the flash, so its bright stretch stays glued behind the dot
+      immediateRender: true, // place it on the path now, or it shows for a frame at the corner of the svg
       motionPath: { path, align: path, alignOrigin: [.5, .5], start: forward ? 0 : 1, end: forward ? 1 : 0 },
     }).then(() => { dot.remove(); arrive(nodes[ev.to], c); });
   }

@@ -72,7 +72,11 @@ public static class Demo
         builder.AddRedisDistributedCache("redis");
         builder.Services.AddSingleton<Timeline>();
         builder.Services.AddFusionCache()
-            .WithOptions(o => o.BackplaneChannelPrefix = builder.Environment.ApplicationName) // accounts and orders share Redis, keep their backplanes apart
+            .WithOptions(o =>
+            {
+                o.BackplaneChannelPrefix = builder.Environment.ApplicationName; // accounts and orders share Redis, keep their backplanes apart
+                o.EnableSyncEventHandlersExecution = true; // background handlers narrated out of order; ours only fire a Redis publish
+            })
             .WithDefaultEntryOptions(o => o.Duration = TimeSpan.FromMinutes(10))
             .WithSerializer(new FusionCacheSystemTextJsonSerializer())
             .WithRegisteredDistributedCache()
