@@ -61,18 +61,11 @@ No instance serves the old value, and no instance had to go back to the database
 
 ## Architecture
 
-```
-            ┌──────── Web :5050 (demo page + backend) ────────┐
-            │ HTTP                                    gRPC    │
-            ▼                                                 ▼
-     AuthService :5000 ──► RabbitMQ ──fanout──►  account-0, account-1  :5100+
-       (JWT)          UserLoggedIn               order-0,   order-1    :5200+
-                                                 (each with its own L1 memory)
-                                                          │
-                                       ┌──────────────────┴──────────────┐
-                                       ▼                                 ▼
-                              Redis: L2 + backplane              MongoDB: source of truth
-```
+![Architecture: Web, AuthService and RabbitMQ on top, four shard instances with their own L1 in the middle, Redis and MongoDB below](docs/architecture.png)
+
+- **Web** serves the demo page and forwards its calls. It uses HTTP to reach AuthService and gRPC to reach the shard instances, because browsers can't call gRPC.
+- **AuthService** issues JWTs and publishes `UserLoggedIn` to a RabbitMQ fanout exchange, which delivers it to every instance.
+- **account-N** and **order-N** each keep an L1 cache in their own memory. They share Redis for L2 and the backplane, and fall back to MongoDB.
 
 [.NET Aspire](https://aspire.dev) runs everything. It starts the services and the Redis, RabbitMQ and MongoDB containers, and it collects traces, metrics and logs in its dashboard.
 
