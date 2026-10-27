@@ -1,0 +1,8 @@
+<Solution>
+  <Project Path="AccountService/AccountService.csproj" />
+  <Project Path="AppHost/AppHost.csproj" />
+  <Project Path="AuthService/AuthService.csproj" />
+  <Project Path="OrderService/OrderService.csproj" />
+  <Project Path="Shared/Shared.csproj" />
+  <Project Path="Web/Web.csproj" />
+</Solution>

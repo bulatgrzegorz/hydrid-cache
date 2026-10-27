@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sharded Hybrid Cache</title>
+<!-- GSAP is vendored in wwwroot/lib so the demo doesn't depend on conference Wi-Fi -->
+<script src="lib/gsap.min.js"></script>
+<script src="lib/MotionPathPlugin.min.js"></script>
+<style>
+  /* 3Blue1Brown look: dark canvas, Manim's color palette, Computer Modern-style serif */
+  :root {
+    color-scheme: dark;
+    --bg: #111; --fg: #ececec; --muted: #8b8b8b; --line: #2b2b2b; --panel: #1c1c1c;
+    --serif: "CMU Serif", "Latin Modern Roman", Charter, Georgia, serif;
+    /* one color per component: its card, its lines, its buttons and its name in the log */
+    --web: #bbbbbb; --auth: #9a72ac; --rabbit: #ff862f; --account: #58c4dd; --order: #5cd0b3; --redis: #e65a4c; --mongo: #699c52;
+    /* what happened: dots, flashes and highlights */
+    --flow: #f7d96f; --hit: #83c167; --miss: #f0ac5f; --skip: #888888; --error: #fc6255;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; display: grid; grid-template-columns: 340px 1fr;
+         font: 16px/1.4 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+  aside { padding: 24px 20px; border-right: 1px solid var(--line); overflow: auto; }
+  main { display: flex; flex-direction: column; min-height: 0; }
+  h1 { font-size: 22px; margin: 0; display: flex; align-items: center; gap: 10px; }
+  h1::before { content: ''; width: 16px; height: 16px; border-radius: 5px;
+               background: linear-gradient(135deg, var(--auth), var(--account), var(--order)); }
+  h2 { font-size: 12px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; color: var(--c, var(--muted));
+       margin: 28px 0 8px 14px; }
+  input, button { font: inherit; padding: 7px 12px; border-radius: 8px; }
+  input { width: 100%; min-width: 0; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+  input:focus { outline: 2px solid var(--c, var(--flow)); border-color: transparent; }
+  /* Apple-style tinted buttons; .primary is the one filled button of each step */
+  button { background: color-mix(in srgb, var(--c, var(--fg)) 15%, var(--bg)); color: var(--c, var(--fg));
+           border: 0; cursor: pointer; white-space: nowrap; }
+  button:hover { background: color-mix(in srgb, var(--c, var(--fg)) 25%, var(--bg)); }
+  button.primary { background: var(--c); color: var(--bg); font-weight: 600; }
+  button.primary:hover { filter: brightness(1.12); }
+  .row { display: flex; gap: 6px; }
+  .note { color: var(--muted); font-size: 13px; margin: 8px 14px 0; }
+  /* Apple-style inset grouped list: rows split by hairlines; details[name] keeps only one action open at a time */
+  .group { background: var(--panel); border-radius: 12px; overflow: hidden; }
+  .group.row { padding: 6px; }
+  details + details { border-top: 1px solid var(--line); }
+  summary { list-style: none; display: flex; align-items: center; gap: 10px; padding: 12px 14px; cursor: pointer; }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
+  summary::after { content: '›'; margin-left: auto; font-size: 20px; line-height: 1; color: var(--muted); transition: rotate .2s; }
+  details[open] summary::after { rotate: 90deg; }
+  .body { display: grid; gap: 10px; padding: 2px 14px 14px; }
+  .field { display: grid; grid-template-columns: 72px 1fr; align-items: center; font-size: 14px; color: var(--muted); }
+  .seg { display: flex; padding: 2px; border-radius: 9px; background: var(--bg); }
+  .seg button { flex: 1; padding: 4px 8px; border-radius: 7px; background: none; color: var(--fg); font-size: 13px; }
+  .seg button.on { background: color-mix(in srgb, var(--c) 30%, var(--bg)); color: var(--c); }
+  pre { background: var(--panel); padding: 10px 14px; border-radius: 12px; font-size: 13px; margin: 0;
+        white-space: pre-wrap; word-break: break-all; }
+  .response:has(pre:empty) { display: none; }
+
+  header { padding: 12px 20px; display: flex; align-items: center; gap: 20px; font-size: 14px; color: var(--muted);
+           border-bottom: 1px solid var(--line); }
+  .legend { flex: 1; display: flex; flex-wrap: wrap; gap: 6px 18px; }
+  i.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+  .speed { display: flex; align-items: center; gap: 8px; }
+  .speed input { width: 140px; margin: 0; padding: 0; border: 0; accent-color: var(--flow); }
+  .speed output { width: 34px; color: var(--fg); font-variant-numeric: tabular-nums; }
+
+  #stage { display: flex; align-items: center; gap: 16px; padding: 16px 20px 4px; }
+  #stage .text { flex: 1; min-width: 0; }
+  #kicker { font: 600 12px system-ui, sans-serif; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  #title { font: 26px/1.25 var(--serif); margin-top: 2px; }
+  #sub { font-family: var(--serif); font-size: 17px; color: var(--muted); margin-top: 2px; min-height: 22px; }
+  /* Manim's Write: playScene slides this mask across, so the text appears left to right behind a soft edge */
+  #title, #sub { width: fit-content; mask: linear-gradient(90deg, #000 40%, transparent 60%) 0 0 / 250% 100% no-repeat; }
+  .stepper { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); white-space: nowrap; }
+  .stepper input { width: auto; margin: 0; accent-color: var(--flow); }
+  #next { --c: var(--flow); }
+  #next:disabled { opacity: .3; cursor: default; filter: none; }
+
+  svg { flex: none; width: 100%; height: 50vh; }
+  .edge { fill: none; stroke: var(--c); stroke-opacity: .4; stroke-width: 2; }
+  .card { fill: color-mix(in srgb, var(--c) 12%, var(--bg)); stroke: color-mix(in srgb, var(--c) 50%, var(--bg)); stroke-width: 2; }
+  .owner .card { stroke: var(--c); stroke-width: 3; }
+  .title { font: 18px var(--serif); fill: var(--fg); }
+  .sub { font: 14px var(--serif); fill: var(--muted); }
+  .owner .sub { fill: var(--c); font-weight: 600; }
+  .chip rect { fill: color-mix(in srgb, var(--c) 20%, var(--bg)); }
+  .chip text { font: 700 11px system-ui, sans-serif; fill: var(--c); text-anchor: middle; }
+
+  #log { flex: 1; overflow: auto; padding: 4px 20px 20px; border-top: 1px solid var(--line); }
+  .action { margin: 14px 0 4px; padding: 5px 10px; border-radius: 6px; border-left: 4px solid var(--c);
+            background: color-mix(in srgb, var(--c) 12%, var(--bg)); font-weight: 600; }
+  .scene { margin: 8px 0 2px; font-weight: 600; }
+  .event { display: grid; grid-template-columns: 16px 90px 1fr; gap: 6px; align-items: center; padding-left: 22px;
+           font: 13px/1.7 ui-monospace, Menlo, monospace; }
+</style>
+</head>
+<body>
+<aside>
+  <h1>Sharded hybrid cache</h1>
+
+  <section style="--c: var(--auth)">
+    <h2>Log in</h2>
+    <div class="group row">
+      <input id="user" value="alice" placeholder="Name" aria-label="User name">
+      <button class="primary" onclick="login()">Log in</button>
+    </div>
+    <p class="note" id="who">Not logged in yet, so calls carry no JWT and get rejected.</p>
+  </section>
+
+  <!-- the shard picker inside each action is filled in by renderShards -->
+  <section style="--c: var(--account)">
+    <h2>AccountService</h2>
+    <div class="group">
+      <details name="action">
+        <summary>Get account</summary>
+        <div class="body">
+          <div class="field">Shard<div class="seg shards"></div></div>
+          <button class="primary" onclick="call('Accounts/Get', 'GET', 'account')">Run</button>
+        </div>
+      </details>
+      <details name="action">
+        <summary>Update account</summary>
+        <div class="body">
+          <label class="field">Name<input id="fullName" value="Alice"></label>
+          <label class="field">Email<input id="email" value="alice@ndc.dev"></label>
+          <div class="field">Shard<div class="seg shards"></div></div>
+          <button class="primary" onclick="call('Accounts/Update', 'POST', 'account', { name: $('fullName').value, email: $('email').value })">Run</button>
+        </div>
+      </details>
+    </div>
+  </section>
+
+  <section style="--c: var(--order)">
+    <h2>OrderService</h2>
+    <div class="group">
+      <details name="action">
+        <summary>Get orders</summary>
+        <div class="body">
+          <div class="field">Shard<div class="seg shards"></div></div>
+          <button class="primary" onclick="call('Orders/Get', 'GET', 'order')">Run</button>
+        </div>
+      </details>
+      <details name="action">
+        <summary>Add order</summary>
+        <div class="body">
+          <label class="field">Product<input id="product" value="coffee"></label>
+          <label class="field">Quantity<input id="quantity" type="number" min="1" value="1"></label>
+          <div class="field">Shard<div class="seg shards"></div></div>
+          <button class="primary" onclick="call('Orders/Add', 'POST', 'order', { product: $('product').value, quantity: +$('quantity').value })">Run</button>
+        </div>
+      </details>
+    </div>
+  </section>
+
+  <section class="response">
+    <h2>Response</h2>
+    <pre id="result"></pre>
+  </section>
+</aside>
+<main>
+  <header>
+    <span class="legend">
+      <span><i class="dot" style="background: var(--flow)"></i>request / message</span>
+      <span><i class="dot" style="background: var(--hit)"></i>cache hit</span>
+      <span><i class="dot" style="background: var(--miss)"></i>miss / wrong shard</span>
+      <span><i class="dot" style="background: var(--skip)"></i>ignored</span>
+      <span><i class="dot" style="background: var(--error)"></i>rejected</span>
+    </span>
+    <label class="speed">Speed
+      <input id="speed" type="range" min="0.1" max="2" step="0.1" value="1" oninput="setSpeed(this.value)">
+      <output id="speedOut"></output>
+    </label>
+    <button onclick="$('log').replaceChildren()">Clear log</button>
+  </header>
+  <div id="stage">
+    <div class="text">
+      <div id="kicker">Ready</div>
+      <div id="title">Log in to start the story</div>
+      <div id="sub">Every call plays as numbered steps. Set the pace with the speed slider, or go step by step.</div>
+    </div>
+    <label class="stepper"><input type="checkbox" id="stepMode" onchange="if (!this.checked) advance?.()">Step by step</label>
+    <button id="next" disabled onclick="advance?.()">Next step ▶</button>
+  </div>
+  <svg viewBox="0 0 1000 560"><g id="edges"></g><g id="nodes"></g><g id="dots"></g></svg>
+  <div id="log"></div>
+</main>
+<script>
+  const $ = id => document.getElementById(id);
+  const css = getComputedStyle(document.documentElement);
+  const colorOf = tone => css.getPropertyValue(`--${tone || 'flow'}`);
+  const kindOf = id => id.split('-')[0]; // account-1 → account, the name of its color
+  const nodes = {}, edges = {};
+  let token = '', user, owner, shard = 0, shardCount = 0, instances = [];
+  gsap.registerPlugin(MotionPathPlugin);
+
+  // Manim's default rate function, ported as is: eases in and out, a bit steeper than sine. thereAndBack runs it out and home again.
+  const smooth = t => { const s = x => 1 / (1 + Math.exp(-x)), e = s(-5); return (s(10 * (t - .5)) - e) / (1 - 2 * e); };
+  const thereAndBack = t => smooth(t < .5 ? 2 * t : 2 - 2 * t);
+  gsap.defaults({ ease: smooth });
+
+  // ---- drawing ----
+
+  function el(tag, attrs, parent) {
+    const e = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return parent.appendChild(e);
+  }
+
+  function box(id, x, y, title, sub, w = 200) {
+    const g = el('g', { transform: `translate(${x} ${y})`, style: `--c: var(--${kindOf(id)})` }, $('nodes'));
+    const card = el('rect', { class: 'card', x: -w / 2, y: -32, width: w, height: 64, rx: 14 }, g);
+    el('text', { class: 'title', x: -w / 2 + 16, y: -5 }, g).textContent = title;
+    const subText = el('text', { class: 'sub', x: -w / 2 + 16, y: 16 }, g);
+    subText.textContent = sub;
+    return nodes[id] = { g, card, sub: subText, x };
+  }
+
+  // Straight line between boxes side by side, vertical S-curve between rows. Colored by the infrastructure it talks to.
+  function edge(a, b, [x1, y1], [x2, y2]) {
+    const kind = ['rabbit', 'redis', 'mongo'].find(k => k === a || k === b) ?? kindOf(b), my = (y1 + y2) / 2;
+    const d = y1 === y2 ? `M${x1},${y1} L${x2},${y2}` : `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`;
+    edges[`${a}>${b}`] = el('path', { class: 'edge', d, style: `--c: var(--${kind})` }, $('edges'));
+  }
+
+  async function draw() {
+    shardCount = await (await fetch('/api/shards')).json();
+    instances = ['account', 'order'].flatMap(s => Array.from({ length: shardCount }, (_, i) => `${s}-${i}`));
+    const n = instances.length, w = Math.min(190, 1000 / n - 30);
+
+    box('web', 170, 70, 'Web', 'backend for this page');
+    box('auth', 500, 70, 'AuthService', 'JWT · publishes logins');
+    box('rabbit', 830, 70, 'RabbitMQ', 'UserLoggedIn fanout');
+    instances.forEach((id, i) => {
+      const node = box(id, 1000 * (i + .5) / n, 280, id, `shard ${id.split('-')[1]}`, w);
+      node.chip = el('g', { class: 'chip', transform: `translate(${w / 2 - 44} -14)` }, node.g);
+      el('rect', { width: 30, height: 28, rx: 7 }, node.chip);
+      el('text', { x: 15, y: 18 }, node.chip).textContent = 'L1';
+    });
+    box('redis', 330, 490, 'Redis', 'L2 cache · backplane'); // after the instances, so the intro draws row by row
+    box('mongo', 670, 490, 'MongoDB', 'source of truth');
+
+    edge('web', 'auth', [270, 70], [400, 70]);
+    edge('auth', 'rabbit', [600, 70], [730, 70]);
+    instances.forEach((id, i) => {
+      const { x } = nodes[id], spread = (i - (n - 1) / 2) * 24;
+      edge('web', id, [170 + spread, 102], [x - 30, 248]);
+      edge('rabbit', id, [830 + spread, 102], [x + 30, 248]);
+      edge(id, 'redis', [x - 30, 312], [330 + spread, 458]);
+      edge(id, 'mongo', [x + 30, 312], [670 + spread, 458]);
+    });
+    renderShards();
+    intro();
+  }
+
+  // Manim's Create: trace a stroke from its start to its end.
+  function create(shape, duration) {
+    const len = shape.getTotalLength();
+    return gsap.fromTo(shape, { strokeDasharray: len, strokeDashoffset: len },
+      { strokeDashoffset: 0, duration, clearProps: 'strokeDasharray,strokeDashoffset' });
+  }
+
+  // The opening shot, Manim's DrawBorderThenFill: box by box the border traces, then fill and text fade in, then the lines draw.
+  function intro() {
+    const tl = gsap.timeline();
+    Object.values(nodes).forEach(({ g, card }, i) => tl
+      .add(create(card, 1), i * .1)
+      .from(card, { fillOpacity: 0, duration: .5 }, i * .1 + .7)
+      .from(g.querySelectorAll(':scope > :not(.card)'), { opacity: 0, duration: .5 }, '<'));
+    Object.values(edges).forEach((path, i) => tl.add(create(path, .8), 1 + i * .02));
+  }
+
+  // One button per shard that actually exists, so the page can't call one that doesn't. Every action has its own copy.
+  function renderShards() {
+    for (const seg of document.querySelectorAll('.shards')) seg.replaceChildren(...Array.from({ length: shardCount }, (_, i) => {
+      const b = document.createElement('button');
+      b.textContent = i === owner ? `${i} · owner` : `${i}`;
+      b.classList.toggle('on', i === shard);
+      b.setAttribute('aria-pressed', i === shard);
+      b.onclick = () => { shard = i; renderShards(); };
+      return b;
+    }));
+  }
+
+  // ---- the story: what each step means ----
+
+  const hit = s => s.every(e => e.tone === 'hit');
+  // [title, one-line explanation] shown big above the diagram. prev is the step before, for L1 checks right after a backplane message.
+  const steps = {
+    jwt: ['AuthService issues a JWT', 'Its sub claim carries the user id. Services read the user from the token, never from the request.'],
+    publish: ['AuthService publishes UserLoggedIn', "Onto a RabbitMQ fanout exchange. Fire and forget: login doesn't wait for what happens next."],
+    reply: s => s[0].tone === 'error' ? ['The call is rejected', `${s[0].text}. It never reached the cache.`]
+      : s[0].source === 'auth' ? ['AuthService replies with the JWT', 'Login is done. Warming the cache carries on in the background.']
+      : [`${s[0].source} replies to Web`, 'The answer goes back to the page.'],
+    fanout: ['RabbitMQ delivers UserLoggedIn to every instance', 'Each one checks hash(user) % shards. The owner warms its cache, the others ignore it.'],
+    l1: (s, prev) => prev === 'bp-receive'
+      ? (hit(s) ? ['It holds a copy in L1, now stale', 'So it fetches the fresh value from L2.'] : ['No copy in its L1', 'Nothing to refresh, done.'])
+      : (hit(s) ? ["L1 hit: found in this instance's memory", 'The fastest path. No network call at all.']
+                : ["L1 miss: not in this instance's memory", 'L1 is in-process memory, private to each instance. Next stop: L2.']),
+    l2: s => hit(s) ? ['L2 hit: Redis has it', 'Copied into L1, so the next call on this instance is a memory hit.']
+      : ['L2 miss: not in Redis either', 'Redis is shared by every instance. Next stop: the database.'],
+    'db-read': ['Loading from MongoDB', 'The source of truth, only reached when both cache levels miss.'],
+    save: ['Saving to L1 + L2', "Into this instance's memory, and into Redis for every other instance."],
+    'bp-send': ['Backplane: announcing the change', 'A tiny Redis pub/sub message carrying just the key: "this changed".'],
+    'bp-receive': ['The other instances hear it', "If they hold a copy in L1 they refresh it from L2. If not, there's nothing to do."],
+    'db-write': ['Writing to MongoDB', 'The source of truth is updated first, then the cache.'],
+  };
+
+  // ---- playing it, one scene per step ----
+
+  // Every animation runs on GSAP's global timeline, so this one knob slows or speeds up the whole story.
+  function setSpeed(v) {
+    gsap.globalTimeline.timeScale(+v);
+    $('speedOut').textContent = `${v}×`;
+  }
+  setSpeed($('speed').value);
+
+  const queue = [];
+  let busy = false, advance = null, action = '', actionKind = 'web', stepNo = 0, prevStep = '';
+
+  function enqueue(ev) {
+    queue.push(ev);
+    if (!busy) { busy = true; setTimeout(run, 150); } // let a burst of events land before cutting the first scene
+  }
+
+  async function run() {
+    while (queue.length) {
+      if ($('stepMode').checked && queue[0].step !== 'request') await waitForNext();
+      await playScene(takeScene()).catch(console.error);
+    }
+    focus(null);
+    busy = false;
+  }
+
+  // Step-by-step mode: the next scene waits for the button, → or a presenter clicker (PageDown).
+  function waitForNext() {
+    $('next').disabled = false;
+    return new Promise(resolve => advance = () => { $('next').disabled = true; advance = null; resolve(); });
+  }
+  document.addEventListener('keydown', e => {
+    if (advance && ['ArrowRight', 'PageDown'].includes(e.key) && e.target.tagName !== 'INPUT') advance();
+  });
+
+  // A scene is the next step plus every queued event of the same step that is next in line for its instance,
+  // so "account-1 and order-1 both miss L1" plays as one scene, while each instance keeps its own order.
+  function takeScene() {
+    const step = queue[0].step, scene = [];
+    queue.forEach((ev, i) => {
+      const before = queue.slice(0, i).filter(e => !scene.includes(e));
+      if (ev.step === step && !scene.some(s => s.source === ev.source)
+          && !before.some(e => e.source === ev.source || e.to === ev.from)) scene.push(ev);
+    });
+    for (const ev of scene) queue.splice(queue.indexOf(ev), 1);
+    return scene;
+  }
+
+  async function playScene(scene) {
+    const ev = scene[0], s = steps[ev.step];
+    let title, sub;
+    if (ev.step === 'request') {
+      [title, sub] = [ev.title, ev.sub];
+      [action, actionKind, stepNo] = [ev.title, kindOf(ev.to), 1];
+    } else {
+      [title, sub] = typeof s === 'function' ? s(scene, prevStep) : s ?? [ev.text, ''];
+      stepNo++;
+    }
+    prevStep = ev.step;
+    $('kicker').textContent = `${action || 'In the background'} · step ${stepNo}`;
+    $('kicker').style.color = `var(--${actionKind})`;
+    $('title').textContent = title;
+    $('sub').textContent = sub;
+    gsap.fromTo('#kicker', { opacity: 0 }, { opacity: 1, duration: .4 });
+    gsap.fromTo('#title, #sub', { maskPosition: '100% 0%' }, { maskPosition: '0% 0%', duration: 1, stagger: .3 }); // Write
+    logScene(scene, title);
+    focus(scene);
+    await Promise.all(scene.map(flow));
+    if (!$('stepMode').checked) await new Promise(r => gsap.delayedCall(1, r)); // time to read; scales with the speed slider
+  }
+
+  // Dim every box the scene doesn't touch, so the eye goes where the action is.
+  function focus(scene) {
+    const involved = new Set(scene?.flatMap(e => [e.source, e.from, e.to]));
+    for (const [id, n] of Object.entries(nodes)) gsap.to(n.g, { opacity: !scene || involved.has(id) ? 1 : .25, duration: .4 });
+  }
+
+  function flow(ev) {
+    const c = colorOf(ev.tone), forward = edges[`${ev.from}>${ev.to}`], path = forward || edges[`${ev.to}>${ev.from}`];
+    if (!path) return ev.to === 'l1' ? lightL1(nodes[ev.source].chip, c) : arrive(nodes[ev.to], c);
+
+    passingFlash(path, c, forward, 1);
+    const dot = el('circle', { r: 7, fill: c }, $('dots'));
+    return gsap.to(dot, {
+      duration: 1, // same duration and ease as the flash, so its bright stretch stays glued behind the dot
+      motionPath: { path, align: path, alignOrigin: [.5, .5], start: forward ? 0 : 1, end: forward ? 1 : 0 },
+    }).then(() => { dot.remove(); arrive(nodes[ev.to], c); });
+  }
+
+  // A colored copy laid over a shape: the flash along a line, a box or the L1 chip lighting up.
+  function copyOf(shape, style) {
+    const copy = shape.cloneNode();
+    copy.removeAttribute('class');
+    Object.assign(copy.style, style);
+    shape.after(copy);
+    return copy;
+  }
+
+  // Manim's ShowPassingFlash: a bright stretch of the line rides along behind the dot, then fades.
+  function passingFlash(path, c, forward, duration) {
+    const len = path.getTotalLength(), tail = len * .35;
+    const copy = copyOf(path, { fill: 'none', stroke: c, strokeWidth: 3, strokeLinecap: 'round', strokeDasharray: `${tail} ${len}` });
+    gsap.timeline({ onComplete: () => copy.remove() })
+      .fromTo(copy, { strokeDashoffset: forward ? tail : -len }, { strokeDashoffset: forward ? tail - len : 0, duration })
+      .to(copy, { opacity: 0, duration: .4 });
+  }
+
+  // Manim's Indicate: grow a little and light up in the tone color, then settle back.
+  function indicate(group, shape, style, scale) {
+    const copy = copyOf(shape, style);
+    gsap.fromTo(copy, { opacity: 0 }, { opacity: 1, duration: .8, ease: thereAndBack, onComplete: () => copy.remove() });
+    return gsap.fromTo(group, { scale: 1 }, { scale, duration: .8, ease: thereAndBack, transformOrigin: '50% 50%' });
+  }
+  const arrive = (node, c) => indicate(node.g, node.card, { fill: 'none', stroke: c, strokeWidth: 3 }, 1.06);
+  const lightL1 = (chip, c) => indicate(chip, chip.firstChild, { fill: c }, 1.3); // L1 lives inside the instance
+
+  function logScene(scene, title) {
+    const head = document.createElement('div');
+    $('log').appendChild(head);
+    if (scene[0].step === 'request') {
+      head.className = 'action';
+      head.style.setProperty('--c', `var(--${kindOf(scene[0].to)})`);
+      head.textContent = `▶ ${title}`;
+    } else {
+      head.className = 'scene';
+      head.textContent = `${stepNo}. ${title}`;
+      for (const { source, text, tone } of scene) {
+        const row = document.createElement('div');
+        row.className = 'event';
+        row.innerHTML = '<i class="dot"></i><b></b><span></span>';
+        const [dot, src, msg] = row.children;
+        dot.style.background = colorOf(tone);
+        src.style.color = `var(--${kindOf(source)})`;
+        src.textContent = source;
+        msg.textContent = text;
+        $('log').appendChild(row);
+      }
+    }
+    $('log').scrollTop = $('log').scrollHeight;
+  }
+
+  // ---- calls ----
+
+  // The services take the user from the JWT's sub claim, so the only way to switch user is a new login.
+  function showSession() {
+    const name = document.createElement('b');
+    name.textContent = user;
+    $('who').replaceChildren('Logged in as ', name, `. Their data is kept warm on shard ${owner}.`);
+  }
+
+  async function login() {
+    user = $('user').value;
+    enqueue({ step: 'request', source: 'web', from: 'web', to: 'auth', title: `Login as ${user}`, sub: 'Web asks AuthService for a JWT.' });
+    const r = await (await fetch(`/api/login/${encodeURIComponent(user)}`, { method: 'POST' })).json();
+    token = r.token;
+    owner = shard = r.shard;
+    renderShards();
+    showSession();
+    $('result').textContent = JSON.stringify(r, null, 2);
+    for (const id of instances) {
+      const i = +id.split('-')[1], owns = i === owner;
+      nodes[id].g.classList.toggle('owner', owns);
+      nodes[id].sub.textContent = owns ? `shard ${i} · owns ${user}` : `shard ${i}`;
+    }
+    // no reply event here: AuthService narrates its own reply, so it lands in the right place in the story
+  }
+
+  // Service events travel via Redis, the reply via HTTP; give the events a head start so the reply comes last.
+  const reply = ev => setTimeout(() => enqueue(ev), 200);
+
+  async function call(rpc, method, service, body) {
+    const target = `${service}-${shard}`, wrong = token && shard !== owner;
+    const sub = !token ? 'No JWT yet: log in first.'
+      : wrong ? `${user} lives on shard ${owner}. This instance can still answer, but it's not where ${user}'s data is kept warm.`
+      : `${target} owns ${user}, so this is where ${user}'s data is kept warm.`;
+    enqueue({ step: 'request', source: 'web', from: 'web', to: target, tone: wrong ? 'miss' : null,
+              title: `${rpc} → ${target}` + (token ? ` as ${user}` : ''), sub });
+    const res = await fetch(`/api/${service}?shard=${shard}`, {
+      method, body: body && JSON.stringify(body),
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    });
+    const data = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    $('result').textContent = JSON.stringify(data, null, 2);
+    reply({ step: 'reply', source: target, from: target, to: 'web', tone: res.ok ? null : 'error',
+            text: res.ok ? 'Replied to web' : `Rejected: ${data.error}` });
+  }
+
+  draw().then(() => new EventSource('/api/timeline').onmessage = e => enqueue(JSON.parse(e.data)));
+</script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+option csharp_namespace = "OrderService";
+
+import "google/protobuf/empty.proto";
+
+// User id comes from the JWT, not the request.
+service Orders {
+  rpc Get (google.protobuf.Empty) returns (OrderList);
+  rpc Add (AddOrderRequest) returns (OrderList);
+}
+
+message AddOrderRequest {
+  string product = 1;
+  int32 quantity = 2;
+}
+
+message Order {
+  string id = 1;
+  string product = 2;
+  int32 quantity = 3;
+}
+
+message OrderList {
+  repeated Order orders = 1;
+}
