@@ -32,7 +32,7 @@ class OrdersApi(IFusionCache cache, IMongoDatabase db, Timeline timeline) : Orde
         await orders.InsertOneAsync(new OrderDoc(Guid.NewGuid().ToString(), userId, request.Product, request.Quantity));
         timeline.Tell("db-write", $"Wrote new order for {userId} to MongoDB", to: "mongo");
         var list = await orders.Find(o => o.UserId == userId).ToListAsync();
-        await cache.SetAsync($"orders:{userId}", list); // writes L1 + L2, backplane evicts stale L1 copies on other nodes
+        await cache.SetAsync($"orders:{userId}", list); // writes L1 + L2, backplane makes other nodes holding a copy refresh it from L2
         return ToProto(list);
     }
 

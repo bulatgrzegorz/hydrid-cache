@@ -32,7 +32,7 @@ class AccountsApi(IFusionCache cache, IMongoDatabase db, Timeline timeline) : Ac
         var doc = new AccountDoc(context.UserId(), request.Name, request.Email);
         await accounts.ReplaceOneAsync(a => a.Id == doc.Id, doc, new ReplaceOptions { IsUpsert = true });
         timeline.Tell("db-write", $"Wrote account {doc.Id} to MongoDB", to: "mongo");
-        await cache.SetAsync($"account:{doc.Id}", doc); // writes L1 + L2, backplane evicts stale L1 copies on other nodes
+        await cache.SetAsync($"account:{doc.Id}", doc); // writes L1 + L2, backplane makes other nodes holding a copy refresh it from L2
         return ToProto(doc);
     }
 
