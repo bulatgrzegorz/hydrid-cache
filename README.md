@@ -88,6 +88,7 @@ To change the number of shards, edit `shards` in [`AppHost/AppHost.cs`](AppHost/
 1. **Log in** with any name. The owner shard is highlighted in the diagram.
 2. **Pick an action**, such as Get account or Add order. It opens with its fields and a shard picker, which defaults to the owner. Press **Run**.
 3. Watch the story. Use **Speed** to slow it down, or turn on **Step by step** and advance with the button, `→` or a presenter clicker (`PageDown`).
+4. Turn on **Show TTL** to see how long each cached copy has left. Entries live a minute in L1 and two minutes in Redis, and when one runs out of L1 the page plays its eviction.
 
 ## Project layout
 

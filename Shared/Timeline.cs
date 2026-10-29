@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Caching.Memory;
 using StackExchange.Redis;
 using ZiggyCreatures.Caching.Fusion;
 
@@ -15,8 +16,9 @@ public class Timeline(IConfiguration config)
     // step is the stage of the story the page groups into one scene (jwt, fanout, l1, l2, db-read, save, bp-send, ...).
     // from/to is the hop the page animates ("rabbit", "redis", "mongo", "web", or "l1" for this instance's memory), defaulting to this instance.
     // tone colors it: "hit", "miss", "skip", or null for a plain request/message.
-    public void Tell(string step, string text, string? from = null, string? to = null, string? tone = null) =>
-        redis.Publish(Channel, JsonSerializer.Serialize(new { step, source, text, from = from ?? source, to = to ?? source, tone }),
+    // key is the cache key, so the page can count down how long each copy has left.
+    public void Tell(string step, string text, string? from = null, string? to = null, string? tone = null, string? key = null) =>
+        redis.Publish(Channel, JsonSerializer.Serialize(new { step, source, text, from = from ?? source, to = to ?? source, tone, key }),
             CommandFlags.FireAndForget);
 
     // FusionCache raises an event for every step, so the L1 / L2 / MongoDB / backplane story tells itself.
@@ -28,6 +30,11 @@ public class Timeline(IConfiguration config)
         cache.Events.Distributed.Miss += (_, e) => Say(e.Key, "l2", $"L2 (Redis) miss {e.Key}", to: "redis", tone: "miss");
         cache.Events.FactorySuccess += (_, e) => Say(e.Key, "db-read", $"Loaded {e.Key} from MongoDB", from: "mongo");
         cache.Events.Distributed.Set += (_, e) => Say(e.Key, "save", $"Saved {e.Key} to L1 + L2", to: "redis");
+        cache.Events.Memory.Eviction += (_, e) =>
+        {
+            if (e.Reason == EvictionReason.Expired) // every Set evicts the entry it overwrites too, as Replaced
+                Say(e.Key, "evict", $"L1 (memory) evicted {e.Key}, its TTL ran out", to: "l1", tone: "miss");
+        };
         cache.Events.Backplane.MessagePublished += (_, e) =>
             Say(e.Message.CacheKey!, "bp-send", $"Backplane: told other instances {e.Message.CacheKey} changed", to: "redis");
         cache.Events.Backplane.MessageReceived += (_, e) =>
@@ -43,6 +50,6 @@ public class Timeline(IConfiguration config)
         // FusionCache checks L1 twice on a miss (before and after its stampede lock), say it once.
         if (text == lastText && DateTime.UtcNow - lastAt < TimeSpan.FromMilliseconds(500)) return;
         (lastText, lastAt) = (text, DateTime.UtcNow);
-        Tell(step, text, from, to, tone);
+        Tell(step, text, from, to, tone, key);
     }
 }

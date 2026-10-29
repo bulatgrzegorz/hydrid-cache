@@ -5,6 +5,7 @@ using Grpc.Core;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -24,6 +25,9 @@ public static class Demo
 
     // shortcut: hardcoded signing key, move it to a secret if this ever leaves the demo.
     public static readonly SymmetricSecurityKey JwtKey = new("ndc-demo-jwt-signing-key-at-least-32-bytes"u8.ToArray());
+
+    // Short, so evictions show up during the demo. L2 outlives L1, so an L1 eviction falls back to Redis, not MongoDB.
+    public static readonly TimeSpan L1Ttl = TimeSpan.FromMinutes(1), L2Ttl = TimeSpan.FromMinutes(2);
 
     // string.GetHashCode is randomized per process, so shard on a stable hash.
     public static int ShardOf(string userId, int shards) =>
@@ -71,13 +75,17 @@ public static class Demo
         builder.AddRabbitMQClient("rabbit");
         builder.AddRedisDistributedCache("redis");
         builder.Services.AddSingleton<Timeline>();
+        // MemoryCache drops an expired entry only when something touches it, so sweep every second: the page sees the eviction as the TTL runs out.
+        var memory = new MemoryCache(new MemoryCacheOptions());
+        builder.Services.AddSingleton(new Timer(_ => memory.Compact(0), null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1))); // DI keeps it alive
         builder.Services.AddFusionCache()
             .WithOptions(o =>
             {
                 o.BackplaneChannelPrefix = builder.Environment.ApplicationName; // accounts and orders share Redis, keep their backplanes apart
                 o.EnableSyncEventHandlersExecution = true; // background handlers narrated out of order; ours only fire a Redis publish
             })
-            .WithDefaultEntryOptions(o => o.Duration = TimeSpan.FromMinutes(10))
+            .WithDefaultEntryOptions(o => { o.Duration = L2Ttl; o.MemoryCacheDuration = L1Ttl; })
+            .WithMemoryCache(memory)
             .WithSerializer(new FusionCacheSystemTextJsonSerializer())
             .WithRegisteredDistributedCache()
             .WithStackExchangeRedisBackplane(o => o.Configuration = builder.Configuration.GetConnectionString("redis"))

@@ -29,6 +29,8 @@ Metadata Bearer(HttpRequest r) => new() { { "Authorization", r.Headers.Authoriza
 
 // The page draws one box per shard instance; Aspire gave us a services:account-N entry for each.
 app.MapGet("/api/shards", () => app.Configuration.GetSection("services").GetChildren().Count(s => s.Key.StartsWith("account-")));
+// The page's TTL countdowns, from the same numbers the services cache with.
+app.MapGet("/api/ttl", () => new { l1 = Demo.L1Ttl.TotalSeconds, l2 = Demo.L2Ttl.TotalSeconds });
 
 app.MapPost("/api/login/{userId}", async (string userId) =>
     Results.Text(await (await auth.PostAsync($"login/{userId}", null)).Content.ReadAsStringAsync(), "application/json"));

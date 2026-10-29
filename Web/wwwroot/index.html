@@ -86,6 +86,10 @@
   .owner .sub { fill: var(--c); font-weight: 600; }
   .chip rect { fill: color-mix(in srgb, var(--c) 20%, var(--bg)); }
   .chip text { font: 700 11px system-ui, sans-serif; fill: var(--c); text-anchor: middle; }
+  /* TTL countdowns, off until the Show TTL switch: the L1 chip drains like a battery */
+  body:not(.show-ttl) .ttl { display: none; }
+  .chip .gauge { fill: var(--c); fill-opacity: .35; }
+  .chip text.ttl { font: 10px ui-monospace, Menlo, monospace; fill: var(--muted); }
 
   #log { flex: 1; overflow: auto; padding: 4px 20px 20px; border-top: 1px solid var(--line); }
   .action { margin: 14px 0 4px; padding: 5px 10px; border-radius: 6px; border-left: 4px solid var(--c);
@@ -167,6 +171,7 @@
       <span><i class="dot" style="background: var(--skip)"></i>ignored</span>
       <span><i class="dot" style="background: var(--error)"></i>rejected</span>
     </span>
+    <label class="stepper"><input type="checkbox" onchange="document.body.classList.toggle('show-ttl', this.checked)">Show TTL</label>
     <label class="speed">Speed
       <input id="speed" type="range" min="0.1" max="2" step="0.1" value="1" oninput="setSpeed(this.value)">
       <output id="speedOut"></output>
@@ -225,6 +230,7 @@
 
   async function draw() {
     shardCount = await (await fetch('/api/shards')).json();
+    durations = await (await fetch('/api/ttl')).json();
     instances = ['account', 'order'].flatMap(s => Array.from({ length: shardCount }, (_, i) => `${s}-${i}`));
     const n = instances.length, w = Math.min(190, 1000 / n - 30);
 
@@ -235,9 +241,12 @@
       const node = box(id, 1000 * (i + .5) / n, 280, id, `shard ${id.split('-')[1]}`, w);
       node.chip = el('g', { class: 'chip', transform: `translate(${w / 2 - 44} -14)` }, node.g);
       el('rect', { width: 30, height: 28, rx: 7 }, node.chip);
+      node.gauge = el('rect', { class: 'ttl gauge', width: 30, rx: 7 }, node.chip);
       el('text', { x: 15, y: 18 }, node.chip).textContent = 'L1';
+      node.ttl = el('text', { class: 'ttl', x: 15, y: 40 }, node.chip);
     });
     box('redis', 330, 490, 'Redis', 'L2 cache · backplane'); // after the instances, so the intro draws row by row
+    nodes.redis.ttl = el('text', { class: 'sub ttl', y: 54, 'text-anchor': 'middle' }, nodes.redis.g);
     box('mongo', 670, 490, 'MongoDB', 'source of truth');
 
     edge('web', 'auth', [270, 70], [400, 70]);
@@ -304,6 +313,7 @@
     'bp-send': ['Backplane: announcing the change', 'A tiny Redis pub/sub message carrying just the key: "this changed".'],
     'bp-receive': ['The other instances hear it', "If they hold a copy in L1 they refresh it from L2. If not, there's nothing to do."],
     'db-write': ['Writing to MongoDB', 'The source of truth is updated first, then the cache.'],
+    evict: ['L1 eviction: the TTL ran out', "The copy is gone from this instance's memory, so the next call here misses L1."],
   };
 
   // ---- playing it, one scene per step ----
@@ -361,10 +371,12 @@
       [title, sub] = [ev.title, ev.sub];
       [action, actionKind, stepNo] = [ev.title, kindOf(ev.to), 1];
     } else {
+      if (ev.step === 'evict') [action, actionKind, stepNo] = ['', 'web', 0]; // the clock did it, not the last call
       [title, sub] = typeof s === 'function' ? s(scene, prevStep) : s ?? [ev.text, ''];
       stepNo++;
     }
     prevStep = ev.step;
+    scene.forEach(trackTtl);
     $('kicker').textContent = `${action || 'In the background'} · step ${stepNo}`;
     $('kicker').style.color = `var(--${actionKind})`;
     $('title').textContent = title;
@@ -448,6 +460,36 @@
     $('log').scrollTop = $('log').scrollHeight;
   }
 
+  // ---- TTL: how long each cached copy of the logged-in user's data has left ----
+
+  let durations; // { l1, l2 } in seconds, from /api/ttl
+  const ttls = {}; // `${where} ${key}` → when it expires, in ms; where is an instance id or 'redis'
+  const keyOf = kind => `${kind === 'order' ? 'orders' : kind}:${user}`; // the keys the services cache under
+
+  // Follows the story: a save starts the L1 and L2 clocks. An L2 hit copies into L1 for the L1 TTL, but never past
+  // Redis' own expiry (FusionCache keeps that on the copy). An L1 miss or an eviction means this instance holds no copy.
+  function trackTtl({ step, source, key, tone, at }) {
+    const l1 = `${source} ${key}`, l2 = `redis ${key}`;
+    if (step === 'save') [ttls[l1], ttls[l2]] = [at + durations.l1 * 1000, at + durations.l2 * 1000];
+    else if (step === 'l2' && tone === 'hit') ttls[l1] = Math.min(at + durations.l1 * 1000, ttls[l2] ?? Infinity);
+    else if (step === 'l2') delete ttls[l2];
+    else if (step === 'evict' || step === 'l1' && tone === 'miss') delete ttls[l1];
+  }
+
+  function showTtl() {
+    const now = Date.now(), secs = end => Math.max(0, Math.ceil((end - now) / 1000));
+    for (const id of instances) {
+      const t = ttls[`${id} ${keyOf(kindOf(id))}`], { gauge, ttl } = nodes[id], h = t ? 28 * Math.max(0, t - now) / (durations.l1 * 1000) : 0;
+      gauge.setAttribute('y', 28 - h);
+      gauge.setAttribute('height', h);
+      ttl.textContent = t ? `${secs(t)}s` : '';
+      ttl.style.fill = t && !secs(t) ? 'var(--miss)' : ''; // expired, still in memory until the sweep or a read evicts it
+    }
+    // Redis drops an expired key itself, right on time, so its countdown just disappears.
+    nodes.redis.ttl.textContent = ['account', 'order'].map(keyOf).filter(k => ttls[`redis ${k}`] && secs(ttls[`redis ${k}`]))
+      .map(k => `${k} ${secs(ttls[`redis ${k}`])}s`).join(' · ');
+  }
+
   // ---- calls ----
 
   // The services take the user from the JWT's sub claim, so the only way to switch user is a new login.
@@ -494,7 +536,11 @@
             text: res.ok ? 'Replied to web' : `Rejected: ${data.error}` });
   }
 
-  draw().then(() => new EventSource('/api/timeline').onmessage = e => enqueue(JSON.parse(e.data)));
+  draw().then(() => {
+    // at: when it really happened, so the TTL clock stays true however slowly the story plays
+    new EventSource('/api/timeline').onmessage = e => enqueue({ ...JSON.parse(e.data), at: Date.now() });
+    setInterval(showTtl, 250);
+  });
 </script>
 </body>
 </html>
