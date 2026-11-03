@@ -1,6 +1,6 @@
 var builder = DistributedApplication.CreateBuilder(args);
 
-const int shards = 2;
+const int shards = 3; // instances per service; the page scales between 1 and this many shards, the rest wait on standby
 var redis = builder.AddRedis("redis");
 var rabbit = builder.AddRabbitMQ("rabbit");
 var mongo = builder.AddMongoDB("mongo");
@@ -8,8 +8,7 @@ var mongo = builder.AddMongoDB("mongo");
 var auth = builder.AddProject<Projects.AuthService>("auth")
     .WithHttpEndpoint(port: 5000)
     .WithReference(rabbit).WaitFor(rabbit)
-    .WithReference(redis).WaitFor(redis)
-    .WithEnvironment("SHARDS", shards.ToString());
+    .WithReference(redis).WaitFor(redis);
 
 // Demo page on http://localhost:5050, it calls auth and every shard
 var web = builder.AddProject<Projects.Web>("web")
@@ -32,8 +31,7 @@ void AddShards<T>(string name, IResourceBuilder<MongoDBDatabaseResource> db, int
             .WithReference(db).WaitFor(db)
             .WithReference(redis).WaitFor(redis)
             .WithReference(rabbit).WaitFor(rabbit)
-            .WithEnvironment("SHARD", i.ToString())
-            .WithEnvironment("SHARDS", shards.ToString());
+            .WithEnvironment("SHARD", i.ToString());
         web.WithReference(shard);
     }
 }

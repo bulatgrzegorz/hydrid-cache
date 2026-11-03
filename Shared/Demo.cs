@@ -1,5 +1,4 @@
 using System.Security.Claims;
-using System.Security.Cryptography;
 using System.Text;
 using Grpc.Core;
 using Microsoft.AspNetCore.Builder;
@@ -16,6 +15,7 @@ using OpenTelemetry.Metrics;
 using OpenTelemetry.Trace;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
+using StackExchange.Redis;
 using ZiggyCreatures.Caching.Fusion;
 using ZiggyCreatures.Caching.Fusion.Serialization.SystemTextJson;
 
@@ -28,10 +28,6 @@ public static class Demo
 
     // Short, so evictions show up during the demo. L2 outlives L1, so an L1 eviction falls back to Redis, not MongoDB.
     public static readonly TimeSpan L1Ttl = TimeSpan.FromMinutes(1), L2Ttl = TimeSpan.FromMinutes(2);
-
-    // string.GetHashCode is randomized per process, so shard on a stable hash.
-    public static int ShardOf(string userId, int shards) =>
-        (int)(BitConverter.ToUInt32(MD5.HashData(Encoding.UTF8.GetBytes(userId))) % shards);
 
     public static string UserId(this ServerCallContext context) =>
         context.GetHttpContext().User.FindFirstValue(ClaimTypes.NameIdentifier)!;
@@ -95,7 +91,8 @@ public static class Demo
     // Every instance gets every UserLoggedIn (fanout, own queue); only the owning shard warms its cache.
     public static async Task HydrateOnLogin(this WebApplication app, Func<string, Task> hydrate)
     {
-        int shard = app.Configuration.GetValue<int>("SHARD"), shards = app.Configuration.GetValue<int>("SHARDS");
+        var shard = app.Configuration.GetValue<int>("SHARD");
+        var redis = app.Services.GetRequiredService<IConnectionMultiplexer>().GetDatabase();
         var timeline = app.Services.GetRequiredService<Timeline>();
         var channel = await app.Services.GetRequiredService<IConnection>().CreateChannelAsync();
         await channel.ExchangeDeclareAsync(UserLoggedIn, ExchangeType.Fanout);
@@ -106,7 +103,7 @@ public static class Demo
         consumer.ReceivedAsync += async (_, e) =>
         {
             var userId = Encoding.UTF8.GetString(e.Body.Span);
-            var owner = ShardOf(userId, shards);
+            var owner = (await Cluster.Load(redis)).OwnerOf(userId); // read on every login, the page can rescale any time
             if (owner != shard)
             {
                 timeline.Tell("fanout", $"Got UserLoggedIn({userId}), shard {owner} owns this user, ignoring", from: "rabbit", tone: "skip");

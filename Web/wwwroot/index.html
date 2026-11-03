@@ -17,6 +17,8 @@
     --web: #bbbbbb; --auth: #9a72ac; --rabbit: #ff862f; --account: #58c4dd; --order: #5cd0b3; --redis: #e65a4c; --mongo: #699c52;
     /* what happened: dots, flashes and highlights */
     --flow: #f7d96f; --hit: #83c167; --miss: #f0ac5f; --skip: #888888; --error: #fc6255;
+    /* one color per shard in the hashing explainer, from the same Manim palette */
+    --s0: #58c4dd; --s1: #f7d96f; --s2: #d147bd; --s3: #83c167; --s4: #f0ac5f; --s5: #9a72ac;
   }
   * { box-sizing: border-box; }
   body { margin: 0; height: 100vh; display: grid; grid-template-columns: 340px 1fr;
@@ -77,7 +79,7 @@
   #next { --c: var(--flow); }
   #next:disabled { opacity: .3; cursor: default; filter: none; }
 
-  svg { flex: none; width: 100%; height: 50vh; }
+  #diagram { flex: none; width: 100%; height: 42vh; }
   .edge { fill: none; stroke: var(--c); stroke-opacity: .4; stroke-width: 2; }
   .card { fill: color-mix(in srgb, var(--c) 12%, var(--bg)); stroke: color-mix(in srgb, var(--c) 50%, var(--bg)); stroke-width: 2; }
   .owner .card { stroke: var(--c); stroke-width: 3; }
@@ -90,8 +92,51 @@
   body:not(.show-ttl) .ttl { display: none; }
   .chip .gauge { fill: var(--c); fill-opacity: .35; }
   .chip text.ttl { font: 10px ui-monospace, Menlo, monospace; fill: var(--muted); }
+  /* standby instances run, but stay out of the cluster until the page scales out */
+  .standby .card { fill: none; stroke-dasharray: 6 6; }
+  .standby .title { fill: var(--muted); }
+  .edge.standby { stroke-opacity: .1; }
 
-  #log { flex: 1; overflow: auto; padding: 4px 20px 20px; border-top: 1px solid var(--line); }
+  /* the bottom panel: tabs for the hashing explainer and the log */
+  .tabs { display: flex; align-items: center; gap: 4px; padding: 6px 20px 0; border-top: 1px solid var(--line); font-size: 14px; }
+  .tabs [role=tab] { background: none; color: var(--muted); border-radius: 0; padding: 8px 12px; }
+  .tabs [role=tab][aria-selected=true] { color: var(--fg); box-shadow: inset 0 -2px var(--flow); }
+  .tabs .legend { margin-left: 16px; color: var(--muted); }
+  #clearLog { margin-left: auto; }
+  [hidden] { display: none !important; }
+
+  /* the hashing explainer: one card per strategy, the same users in each */
+  #hashing { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; padding: 12px 20px 16px; }
+  .method { margin: 0; min-height: 0; display: flex; flex-direction: column; padding: 10px 14px; border-radius: 12px; border: 1px solid var(--line); }
+  .method.routing { border-color: color-mix(in srgb, var(--flow) 40%, var(--bg)); }
+  .method h3 { font: 19px var(--serif); margin: 0; display: flex; align-items: baseline; gap: 10px; }
+  .badge { font: 600 11px system-ui, sans-serif; letter-spacing: .06em; text-transform: uppercase; color: color-mix(in srgb, var(--flow) 75%, var(--bg)); visibility: hidden; }
+  .routing .badge { visibility: visible; }
+  .method .formula { font: italic 15px var(--serif); margin-top: 1px; }
+  .method p { font: 14px/1.3 var(--serif); color: var(--muted); margin: 3px 0 0; }
+  .method svg { flex: 1 1 0; min-height: 0; width: 100%; margin: 4px 0 6px; }
+  .method p.moved { color: var(--fg); min-height: 1.3em; margin: 4px 0 0; white-space: pre-line; }
+  /* each shard's share of the sample keys: a bar split by shard, the percentage under each part */
+  .load { display: flex; gap: 2px; font: 12px system-ui, sans-serif; font-variant-numeric: tabular-nums; }
+  .load::before { content: 'load'; flex: none; width: 38px; color: var(--muted); }
+  .load span { min-width: 0; overflow: hidden; white-space: nowrap; color: var(--c); border-top: 5px solid var(--bar); padding-top: 3px;
+               transition: flex-basis .8s; }
+  .method text { font: 12px system-ui, sans-serif; fill: var(--muted); }
+  .method text.me { fill: var(--fg); font-weight: 600; }
+  .method text.shard { font-weight: 600; }
+  .method text.hour { font-weight: 700; font-size: 11px; }
+  .method text.score { font-size: 11px; font-variant-numeric: tabular-nums; }
+  .method text.win, .method text.win ~ text { fill: var(--fg); }
+  .method .track { fill: none; stroke: var(--line); }
+  .method text.center { font: 17px var(--serif); fill: var(--fg); }
+  .method .wedge { stroke-width: 1.5; }
+  .method .point { stroke-width: 2; }
+  .method .walk path:first-child { fill: none; stroke: var(--c); stroke-width: 2; stroke-linejoin: round; }
+  .method .walk path + path { fill: var(--c); }
+  .method .lead { stroke: var(--line); }
+  .method .dot { stroke: var(--bg); stroke-width: 2; }
+
+  #log { flex: 1; overflow: auto; padding: 4px 20px 20px; }
   .action { margin: 14px 0 4px; padding: 5px 10px; border-radius: 6px; border-left: 4px solid var(--c);
             background: color-mix(in srgb, var(--c) 12%, var(--bg)); font-weight: 600; }
   .scene { margin: 8px 0 2px; font-weight: 600; }
@@ -157,6 +202,17 @@
     </div>
   </section>
 
+  <!-- filled in by renderCluster -->
+  <section style="--c: var(--flow)">
+    <h2>Cluster</h2>
+    <div class="group">
+      <div class="body" style="padding-top: 14px">
+        <div class="field">Shards<div class="seg" id="shardsIn"></div></div>
+        <div class="field">Routing<div class="seg" id="routing"></div></div>
+      </div>
+    </div>
+  </section>
+
   <section class="response">
     <h2>Response</h2>
     <pre id="result"></pre>
@@ -176,7 +232,6 @@
       <input id="speed" type="range" min="0.1" max="2" step="0.1" value="1" oninput="setSpeed(this.value)">
       <output id="speedOut"></output>
     </label>
-    <button onclick="$('log').replaceChildren()">Clear log</button>
   </header>
   <div id="stage">
     <div class="text">
@@ -187,14 +242,48 @@
     <label class="stepper"><input type="checkbox" id="stepMode" onchange="if (!this.checked) advance?.()">Step by step</label>
     <button id="next" disabled onclick="advance?.()">Next step ▶</button>
   </div>
-  <svg viewBox="0 0 1000 560"><g id="edges"></g><g id="nodes"></g><g id="dots"></g></svg>
-  <div id="log"></div>
+  <svg id="diagram" viewBox="0 0 1000 560"><g id="edges"></g><g id="nodes"></g><g id="dots"></g></svg>
+  <div class="tabs" role="tablist">
+    <button role="tab" id="tab-hashing" aria-controls="hashing" aria-selected="true" onclick="showTab('hashing')">Hashing</button>
+    <button role="tab" id="tab-log" aria-controls="log" aria-selected="false" onclick="showTab('log')">Log</button>
+    <span class="legend" id="shardLegend"></span>
+    <button id="clearLog" hidden onclick="$('log').replaceChildren()">Clear log</button>
+  </div>
+  <!-- the same logged-in users under each strategy, drawn by drawHashing -->
+  <div id="hashing" role="tabpanel" aria-labelledby="tab-hashing">
+    <figure class="method" data-strategy="modulo">
+      <h3>Modulo <span class="badge">routes calls</span></h3>
+      <div class="formula">owner = hash(user) mod N</div>
+      <p>A clock of hash mod <span class="hours">6</span>: hour h goes to shard h mod N. Change N and most hours switch.</p>
+      <svg viewBox="-150 -95 300 190" role="img" aria-label="Users on a clock of hash remainders, each hour colored by its shard"></svg>
+      <div class="load" title="Each shard's share of 1,000 test users"></div>
+      <p class="moved" title="Measured on 1,000 test users"></p>
+    </figure>
+    <figure class="method" data-strategy="ring">
+      <h3>Consistent hashing <span class="badge">routes calls</span></h3>
+      <div class="formula">owner = first shard point clockwise</div>
+      <p>Each user walks clockwise to the next shard point, so a shard owns the slice ending at its point. A new shard's point halves the biggest slice: only that neighbor gets relief.</p>
+      <svg viewBox="-150 -95 300 190" role="img" aria-label="Users around a hash ring cut into one slice per shard, each slice ending at its shard's point"></svg>
+      <div class="load" title="Each shard's share of 1,000 test users"></div>
+      <p class="moved" title="Measured on 1,000 test users"></p>
+    </figure>
+    <figure class="method" data-strategy="hrw">
+      <h3>Rendezvous (HRW) <span class="badge">routes calls</span></h3>
+      <div class="formula">owner = argmax hash(user, shard)</div>
+      <p>Each user ranks the shards by score, and the first one owns them. A new shard takes a user only by ranking first.</p>
+      <svg viewBox="-150 -95 300 190" role="img" aria-label="Each user with the shards ranked by their score, highest first; the first one owns the user"></svg>
+      <div class="load" title="Each shard's share of 1,000 test users"></div>
+      <p class="moved" title="Measured on 1,000 test users"></p>
+    </figure>
+  </div>
+  <div id="log" role="tabpanel" aria-labelledby="tab-log" hidden></div>
 </main>
 <script>
   const $ = id => document.getElementById(id);
   const css = getComputedStyle(document.documentElement);
   const colorOf = tone => css.getPropertyValue(`--${tone || 'flow'}`);
   const kindOf = id => id.split('-')[0]; // account-1 → account, the name of its color
+  const shardOf = id => +id.split('-')[1]; // account-1 → 1
   const nodes = {}, edges = {};
   let token = '', user, owner, shard = 0, shardCount = 0, instances = [];
   gsap.registerPlugin(MotionPathPlugin);
@@ -229,8 +318,7 @@
   }
 
   async function draw() {
-    shardCount = await (await fetch('/api/shards')).json();
-    durations = await (await fetch('/api/ttl')).json();
+    [shardCount, durations, cluster] = await Promise.all(['/api/shards', '/api/ttl', '/api/cluster'].map(async url => (await fetch(url)).json()));
     instances = ['account', 'order'].flatMap(s => Array.from({ length: shardCount }, (_, i) => `${s}-${i}`));
     const n = instances.length, w = Math.min(190, 1000 / n - 30);
 
@@ -238,7 +326,7 @@
     box('auth', 500, 70, 'AuthService', 'JWT · publishes logins');
     box('rabbit', 830, 70, 'RabbitMQ', 'UserLoggedIn fanout');
     instances.forEach((id, i) => {
-      const node = box(id, 1000 * (i + .5) / n, 280, id, `shard ${id.split('-')[1]}`, w);
+      const node = box(id, 1000 * (i + .5) / n, 280, id, `shard ${shardOf(id)}`, w);
       node.chip = el('g', { class: 'chip', transform: `translate(${w / 2 - 44} -14)` }, node.g);
       el('rect', { width: 30, height: 28, rx: 7 }, node.chip);
       node.gauge = el('rect', { class: 'ttl gauge', width: 30, rx: 7 }, node.chip);
@@ -258,7 +346,7 @@
       edge(id, 'redis', [x - 30, 312], [330 + spread, 458]);
       edge(id, 'mongo', [x + 30, 312], [670 + spread, 458]);
     });
-    renderShards();
+    renderCluster();
     intro();
   }
 
@@ -279,16 +367,20 @@
     Object.values(edges).forEach((path, i) => tl.add(create(path, .8), 1 + i * .02));
   }
 
-  // One button per shard that actually exists, so the page can't call one that doesn't. Every action has its own copy.
+  // A button of a segmented control; .on marks the chosen one.
+  function segButton(text, on, onclick) {
+    const b = document.createElement('button');
+    b.textContent = text;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', on);
+    b.onclick = onclick;
+    return b;
+  }
+
+  // One button per shard in the cluster, so the page can't call one on standby. Every action has its own copy.
   function renderShards() {
-    for (const seg of document.querySelectorAll('.shards')) seg.replaceChildren(...Array.from({ length: shardCount }, (_, i) => {
-      const b = document.createElement('button');
-      b.textContent = i === owner ? `${i} · owner` : `${i}`;
-      b.classList.toggle('on', i === shard);
-      b.setAttribute('aria-pressed', i === shard);
-      b.onclick = () => { shard = i; renderShards(); };
-      return b;
-    }));
+    for (const seg of document.querySelectorAll('.shards')) seg.replaceChildren(...Array.from({ length: cluster.shards },
+      (_, i) => segButton(i === owner ? `${i} · owner` : `${i}`, i === shard, () => { shard = i; renderShards(); })));
   }
 
   // ---- the story: what each step means ----
@@ -301,7 +393,7 @@
     reply: s => s[0].tone === 'error' ? ['The call is rejected', `${s[0].text}. It never reached the cache.`]
       : s[0].source === 'auth' ? ['AuthService replies with the JWT', 'Login is done. Warming the cache carries on in the background.']
       : [`${s[0].source} replies to Web`, 'The answer goes back to the page.'],
-    fanout: ['RabbitMQ delivers UserLoggedIn to every instance', 'Each one checks hash(user) % shards. The owner warms its cache, the others ignore it.'],
+    fanout: ['RabbitMQ delivers UserLoggedIn to every instance', 'Each one checks which shard owns the user. The owner warms its cache, the others ignore it.'],
     l1: (s, prev) => prev === 'bp-receive'
       ? (hit(s) ? ['It holds a copy in L1, now stale', 'So it fetches the fresh value from L2.'] : ['No copy in its L1', 'Nothing to refresh, done.'])
       : (hit(s) ? ["L1 hit: found in this instance's memory", 'The fastest path. No network call at all.']
@@ -477,6 +569,7 @@
   }
 
   function showTtl() {
+    if (!document.body.classList.contains('show-ttl')) return;
     const now = Date.now(), secs = end => Math.max(0, Math.ceil((end - now) / 1000));
     for (const id of instances) {
       const t = ttls[`${id} ${keyOf(kindOf(id))}`], { gauge, ttl } = nodes[id], h = t ? 28 * Math.max(0, t - now) / (durations.l1 * 1000) : 0;
@@ -488,6 +581,269 @@
     // Redis drops an expired key itself, right on time, so its countdown just disappears.
     nodes.redis.ttl.textContent = ['account', 'order'].map(keyOf).filter(k => ttls[`redis ${k}`] && secs(ttls[`redis ${k}`]))
       .map(k => `${k} ${secs(ttls[`redis ${k}`])}s`).join(' · ');
+  }
+
+  // ---- the cluster: how many shards are in, and which strategy maps users onto them ----
+
+  // { shards, strategy, ring, sample, users: [{ id, hash, scores, owners }] } from /api/cluster. ring (one point per shard),
+  // hash and scores are the 32-bit hashes the server routes by; sample is each strategy's owners of 1,000 test keys.
+  let cluster;
+  const strategies = { modulo: 'Modulo', ring: 'Ring', hrw: 'HRW' };
+
+  // previous is the cluster before this change, if any, so the hashing explainer can animate what changed.
+  function renderCluster(previous) {
+    owner = cluster.users.find(u => u.id === user)?.owners[cluster.strategy];
+    shard = owner ?? Math.min(shard, cluster.shards - 1);
+    $('shardsIn').replaceChildren(...Array.from({ length: shardCount },
+      (_, i) => segButton(`${i + 1}`, i + 1 === cluster.shards, () => changeCluster({ shards: i + 1 }))));
+    $('routing').replaceChildren(...Object.entries(strategies).map(
+      ([s, name]) => segButton(name, s === cluster.strategy, () => changeCluster({ strategy: s }))));
+    for (const id of instances) {
+      const i = shardOf(id), owns = i === owner, standby = i >= cluster.shards;
+      nodes[id].g.classList.toggle('owner', owns);
+      nodes[id].g.classList.toggle('standby', standby);
+      nodes[id].sub.textContent = standby ? 'standby' : owns ? `owns ${user}` : `shard ${i}`; // short, the boxes get narrow
+      for (const e of [`web>${id}`, `rabbit>${id}`, `${id}>redis`, `${id}>mongo`]) edges[e].classList.toggle('standby', standby);
+    }
+    renderShards();
+    if (user) showSession();
+    drawHashing(previous);
+  }
+
+  // A change plays as its own action: the instances joining or leaving light up, and the subtitle counts the users
+  // that get a new owner. Their first call there misses L1, and Redis (L2) answers it.
+  async function changeCluster(change) {
+    if (change.shards === cluster.shards || change.strategy === cluster.strategy) return;
+    const res = await fetch(`/api/cluster?${new URLSearchParams(change)}`, { method: 'POST' });
+    if (!res.ok) return;
+    const previous = cluster;
+    cluster = await res.json();
+    const was = id => previous.users.find(u => u.id === id)?.owners;
+    const moved = (from, to) => cluster.users.filter(u => was(u.id) && was(u.id)[from] !== u.owners[to]).length;
+    const of = `of ${cluster.users.length} users`;
+    if (change.strategy) {
+      enqueue({ step: 'request', source: 'web', from: 'web', to: 'web', title: `Routing by ${strategies[cluster.strategy]}`,
+                sub: `${moved(previous.strategy, cluster.strategy)} ${of} get a new owner, where their first call misses L1.` });
+    } else {
+      const [lo, hi] = [previous.shards, cluster.shards].sort((a, b) => a - b);
+      const title = `Scale ${cluster.shards > previous.shards ? 'out' : 'in'} to ${cluster.shards} shards`;
+      const others = Object.keys(strategies).filter(s => s !== cluster.strategy).map(s => `${strategies[s]} ${moved(s, s)}`).join(', ');
+      const sub = `Routing by ${strategies[cluster.strategy]}: ${moved(cluster.strategy, cluster.strategy)} ${of} get a new owner (${others}).`;
+      for (const id of instances.filter(id => shardOf(id) >= lo && shardOf(id) < hi))
+        enqueue({ step: 'request', source: id, from: id, to: id, title, sub });
+    }
+    renderCluster(previous);
+  }
+
+  // ---- the hashing explainer: the same users under each strategy, side by side ----
+
+  const shardColor = i => colorOf(`s${i % 6}`).trim();
+  const turnOf = hash => hash / 2 ** 32; // where a 32-bit hash sits on a circle, as a fraction of a turn
+  const polar = (turn, r) => [r * Math.sin(turn * 2 * Math.PI), -r * Math.cos(turn * 2 * Math.PI)]; // 0 at the top, clockwise
+  const gcd = (a, b) => b ? gcd(b, a % b) : a;
+  const r0 = 38, r1 = 64; // the inner and outer radius of the clock's and the ring's band
+
+  // A shard's color mixed into the canvas, like the diagram's boxes and lines: 1 is the full color.
+  // An rgb() string rather than color-mix(), so GSAP can tween between two of them.
+  function tint(i, amount) {
+    const rgb = hex => (hex.length === 4 ? [...hex.slice(1)].map(x => x + x) : hex.slice(1).match(/../g)).map(x => parseInt(x, 16)); // #111 too
+    const [c, bg] = [shardColor(i), css.getPropertyValue('--bg').trim()].map(rgb);
+    return `rgb(${c.map((v, k) => Math.round(bg[k] + (v - bg[k]) * amount))})`;
+  }
+
+  // The bottom panel: the hashing explainer by default, the log one tab over.
+  function showTab(tab) {
+    for (const id of ['hashing', 'log']) {
+      $(id).hidden = id !== tab;
+      $(`tab-${id}`).setAttribute('aria-selected', id === tab);
+    }
+    $('shardLegend').hidden = tab !== 'hashing';
+    $('clearLog').hidden = tab !== 'log';
+  }
+
+  // Redraws all three cards. With the panel in view, it animates the change since the last draw, Manim style:
+  // a new shard sweeps in, recolored hours fade over, and every user that moved lights up in its new shard's color.
+  function drawHashing(previous) {
+    const was = $('hashing').hidden ? null : previous;
+    for (const fig of document.querySelectorAll('.method')) {
+      const s = fig.dataset.strategy, svg = fig.querySelector('svg');
+      fig.classList.toggle('routing', s === cluster.strategy);
+      svg.replaceChildren();
+      for (const [u, dot] of { modulo: drawClock, ring: drawRing, hrw: drawRankings }[s](svg, was)) {
+        const old = was?.users.find(w => w.id === u.id)?.owners[s];
+        if (!was || old === u.owners[s]) continue;
+        if (old === undefined) { gsap.from(dot, { opacity: 0, duration: .6 }); continue; } // just logged in
+        gsap.from(dot, { fill: tint(old, .8), duration: 1 });
+        gsap.fromTo(dot, { scale: 1 }, { scale: 2, duration: .8, ease: thereAndBack, transformOrigin: '50% 50%' }); // Indicate
+      }
+      drawLoad(fig.querySelector('.load'), cluster.sample[s]);
+      if (previous && previous.shards !== cluster.shards) {
+        // Measured on the test users: a handful of logged-in ones is too few to show a strategy's rate.
+        const moved = cluster.sample[s].filter((o, k) => o !== previous.sample[s][k]).length / cluster.sample[s].length;
+        // The least any strategy can move and still end up even: the users the added shards take, or the removed ones had.
+        const least = Math.abs(cluster.shards - previous.shards) / Math.max(cluster.shards, previous.shards);
+        fig.querySelector('.moved').textContent = `${previous.shards} → ${cluster.shards} shards: ${Math.round(moved * 100)}% of users get a new owner.`
+          + `\nKeeping the shards even needs ${Math.round(least * 100)}%.`;
+      }
+    }
+    $('shardLegend').replaceChildren(...Array.from({ length: cluster.shards }, (_, i) => {
+      const item = document.createElement('span');
+      item.innerHTML = '<i class="dot"></i>';
+      item.firstChild.style.background = tint(i, .8);
+      item.append(`shard ${i}`);
+      return item;
+    }));
+  }
+
+  // Each shard's share of the sample keys. The parts persist, so a CSS transition slides them to their new size.
+  function drawLoad(bar, owners) {
+    for (let i = bar.children.length; i < shardCount; i++) {
+      const part = bar.appendChild(document.createElement('span'));
+      part.style.setProperty('--c', tint(i, .75));
+      part.style.setProperty('--bar', tint(i, .4));
+    }
+    [...bar.children].forEach((part, i) => {
+      const share = owners.filter(o => o === i).length / owners.length;
+      part.style.flexBasis = `${share * 100}%`;
+      part.textContent = share ? `${Math.round(share * 100)}%` : '';
+    });
+  }
+
+  // A user's dot in its owner's color, returned with the user so drawHashing can animate it.
+  const userDot = (svg, u, strategy, [x, y]) =>
+    [u, el('circle', { cx: x, cy: y, r: 5, class: 'dot', style: `fill: ${tint(u.owners[strategy], .8)}` }, svg)];
+
+  // Names beside a spot on a circle, on its outer side. Users sitting together share one label.
+  function names(svg, users, [x, y]) {
+    const side = Math.abs(x) < 12 ? 'middle' : x > 0 ? 'start' : 'end';
+    el('text', { x: x + { start: 9, end: -9, middle: 0 }[side], y: side === 'middle' ? y + (y < 0 ? -9 : 17) : y + 4, 'text-anchor': side,
+                 class: users.some(u => u.id === user) ? 'me' : '' }, svg).textContent = users.map(u => u.id).join(', ');
+  }
+
+  // A slice of the band between radii r0 and r1, clockwise from turn a to turn b: a clock's hour, or a shard's part of the ring.
+  function band(a, b) {
+    if (b - a >= 1) b = a + .9999; // a whole turn: an arc can't end where it starts
+    const [x0, y0] = polar(a, r1), [x1, y1] = polar(b, r1), [x2, y2] = polar(b, r0), [x3, y3] = polar(a, r0), large = b - a > .5 ? 1 : 0;
+    return `M${x0},${y0} A${r1},${r1} 0 ${large} 1 ${x1},${y1} L${x2},${y2} A${r0},${r0} 0 ${large} 0 ${x3},${y3} Z`;
+  }
+  const wedgeStyle = i => `fill: ${tint(i, .14)}; stroke: ${tint(i, .4)}`;
+
+  // Modulo as a clock. Its hours count hash mod H, where H is divisible by every shard count the page offers,
+  // so hour h belongs to shard h mod N exactly: that's the user's hash mod N.
+  function drawClock(svg, was) {
+    const hours = Math.max(2, Array.from({ length: shardCount }, (_, i) => i + 1).reduce((a, b) => a * b / gcd(a, b)));
+    for (const span of document.querySelectorAll('.method .hours')) span.textContent = hours;
+    for (let h = 0; h < hours; h++) {
+      const i = h % cluster.shards;
+      const wedge = el('path', { d: band((h - .5) / hours, (h + .5) / hours), class: 'wedge', style: wedgeStyle(i) }, svg);
+      const [x, y] = polar(h / hours, (r0 + r1) / 2);
+      const label = el('text', { x, y: y + 4, class: 'hour', 'text-anchor': 'middle', style: `fill: ${tint(i, .75)}` }, svg);
+      label.textContent = h;
+      if (was && h % was.shards !== i) {
+        const j = h % was.shards;
+        gsap.from(wedge, { fill: tint(j, .14), stroke: tint(j, .4), duration: 1.2 });
+        gsap.from(label, { fill: tint(j, .75), duration: 1.2 });
+      }
+    }
+    el('text', { x: 0, y: 6, class: 'center', 'text-anchor': 'middle' }, svg).textContent = `mod ${cluster.shards}`;
+    for (const [h, users] of Map.groupBy(cluster.users, u => u.hash % hours)) names(svg, users, polar(h / hours, r1 + 12));
+    return cluster.users.map(u => {
+      console.assert(u.hash % hours % cluster.shards === u.owners.modulo, `the clock puts ${u.id} on another shard than the server`);
+      return userDot(svg, u, 'modulo', polar(u.hash % hours / hours, r1 + 12));
+    });
+  }
+
+  // Consistent hashing on the same kind of dial as the clock: shards and users hash onto one circle, and each shard
+  // owns the slice that ends at its point. Keys spread evenly around the circle, so a slice's share of the turn is
+  // that shard's share of the load.
+  function drawRing(svg, was) {
+    const mid = (r0 + r1) / 2;
+    const points = cluster.ring.map((hash, i) => ({ turn: turnOf(hash), i })).sort((a, b) => a.turn - b.turn);
+    points.forEach(({ turn, i }, k) => {
+      const from = k ? points[k - 1].turn : points.at(-1).turn - 1;
+      const slice = el('path', { d: band(from, turn), class: 'wedge', style: wedgeStyle(i) }, svg);
+      if (was && i >= was.shards) { // the new shard sweeps over the slice it takes from the next old shard clockwise
+        const old = [...points.slice(k + 1), ...points].find(p => p.i < was.shards).i, sweep = { to: from };
+        svg.insertBefore(el('path', { d: band(from, turn), class: 'wedge', style: wedgeStyle(old) }, svg), slice);
+        slice.setAttribute('d', band(from, from));
+        gsap.to(sweep, { to: turn, duration: 1.2, onUpdate: () => slice.setAttribute('d', band(from, sweep.to)) });
+      }
+    });
+    // The logged-in user's walk: clockwise from their hash to the edge of the first shard point.
+    const me = cluster.users.find(u => u.id === user);
+    if (me) {
+      const start = turnOf(me.hash), point = turnOf(cluster.ring[me.owners.ring]);
+      const end = Math.max(start, point + (point < start ? 1 : 0) - 11 / (2 * Math.PI * mid));
+      const [x0, y0] = polar(start, r1 + 4), [x1, y1] = polar(start, mid), [x2, y2] = polar(end, mid);
+      const [tx, ty] = polar(end + .25, 1), [nx, ny] = polar(end, 1); // clockwise and outward at the arrow's tip
+      const g = el('g', { class: 'walk', style: `--c: ${tint(me.owners.ring, 1)}` }, svg);
+      const path = el('path', { d: `M${x0},${y0} L${x1},${y1} A${mid},${mid} 0 ${end - start > .5 ? 1 : 0} 1 ${x2},${y2}` }, g);
+      const head = el('path', { d: `M${x2},${y2} L${x2 - 7 * tx + 4 * nx},${y2 - 7 * ty + 4 * ny} L${x2 - 7 * tx - 4 * nx},${y2 - 7 * ty - 4 * ny}Z` }, g);
+      if (!$('hashing').hidden) {
+        create(path, 1).delay(.6);
+        gsap.from(head, { opacity: 0, duration: .3, delay: 1.5 });
+      }
+    }
+    // Names in a column each side of the dial, like pie chart labels: pushed apart where users hash close together,
+    // with a line back to their dot.
+    const R = r1 + 20;
+    for (const side of [1, -1]) {
+      const col = cluster.users.map(u => ({ u, at: turnOf(u.hash) })).filter(s => s.at < .5 === side > 0)
+        .map(s => ({ ...s, y: polar(s.at, R)[1] })).sort((a, b) => a.y - b.y);
+      col.forEach((s, k) => { if (k) s.y = Math.max(s.y, col[k - 1].y + 14); });
+      for (let k = col.length - 1; k >= 0; k--) col[k].y = Math.min(col[k].y, k === col.length - 1 ? 88 : col[k + 1].y - 14);
+      for (const { u, at, y } of col) {
+        const x = side * Math.max(16, Math.sqrt(Math.max(0, R * R - y * y))), [dx, dy] = polar(at, r1 + 15);
+        el('line', { x1: dx, y1: dy, x2: x, y2: y, class: 'lead' }, svg);
+        el('text', { x: x + side * 3, y: y + 4, 'text-anchor': side > 0 ? 'start' : 'end', class: u.id === user ? 'me' : '' }, svg)
+          .textContent = u.id;
+      }
+    }
+    const dots = cluster.users.map(u => userDot(svg, u, 'ring', polar(turnOf(u.hash), r1 + 10)));
+    for (const { turn, i } of points) { // drawn last, so the shard numbers sit on top
+      const [x, y] = polar(turn, mid), point = el('g', {}, svg);
+      el('circle', { cx: x, cy: y, r: 9, class: 'point', style: `fill: ${tint(i, .14)}; stroke: ${tint(i, .5)}` }, point);
+      el('text', { x, y: y + 4, class: 'shard', 'text-anchor': 'middle', style: `fill: ${tint(i, .8)}` }, point).textContent = i;
+      if (was && i >= was.shards) gsap.from(point, { scale: 0, duration: .6, transformOrigin: '50% 50%' });
+    }
+    return dots;
+  }
+
+  // Rendezvous hashing as each user's ranking: every shard scores the user with hash(user, shard), and the shards
+  // line up highest first. The first one owns the user. A new shard slots into every ranking, and the rest slide over.
+  function drawRankings(svg, was) {
+    const n = cluster.users.length, rowH = Math.min(30, 160 / Math.max(1, n)), h = Math.min(14, rowH - 8);
+    const cw = Math.min(110, 226 / cluster.shards - 12), xOf = place => -76 + place * (cw + 12);
+    const ranked = u => u.scores.map((score, i) => ({ score, i })).sort((a, b) => b.score - a.score);
+    // A shard's number, then its score as a bar in a track that stands for 100, the score itself at the track's end.
+    const chip = (i, score, place, y) => {
+      const g = el('g', { transform: `translate(${xOf(place)} ${y})` }, svg), win = !place, len = cw - 11;
+      el('text', { y: 4, class: win ? 'shard win' : 'shard', style: win ? '' : `fill: ${tint(i, .7)}` }, g).textContent = i;
+      el('rect', { x: 11, y: -h / 2, width: len, height: h, rx: 3, class: 'track' }, g);
+      el('rect', { x: 11, y: -h / 2, width: len * turnOf(score), height: h, rx: 3, class: 'bar', style: `fill: ${tint(i, win ? .6 : .3)}` }, g);
+      el('text', { x: cw - 4, y: 4, class: 'score', 'text-anchor': 'end' }, g).textContent = Math.floor(turnOf(score) * 100);
+      return g;
+    };
+    el('text', { x: xOf(0), y: -84 }, svg).textContent = 'shard and its score, highest first';
+    if (!n) el('text', { x: 0, y: 4, 'text-anchor': 'middle' }, svg).textContent = 'log in to see users rank the shards';
+    return cluster.users.map((u, k) => {
+      const y = -66 + k * rowH, before = was?.users.find(w => w.id === u.id);
+      const old = before && was.shards !== cluster.shards ? ranked(before).map(c => c.i) : null;
+      el('text', { x: -132, y: y + 4, class: u.id === user ? 'me' : '' }, svg).textContent = u.id;
+      ranked(u).forEach(({ score, i }, place) => {
+        const g = chip(i, score, place, y), from = old?.indexOf(i);
+        if (!old || from === place) return;
+        if (from < 0) gsap.from(g, { opacity: 0, scale: .6, transformOrigin: '50% 50%', duration: .6, delay: .5 }); // the new shard slots in
+        else gsap.from(g, { attr: { transform: `translate(${xOf(from)} ${y})` }, duration: .8 });
+        if (from === 0) gsap.from(g.querySelector('.bar'), { fill: tint(i, .6), duration: .8 }); // lost the user
+        if (place === 0 && from > 0) gsap.from(g.querySelector('.bar'), { fill: tint(i, .3), duration: .8 }); // won it
+      });
+      for (const [from, i] of (old ?? []).entries()) if (i >= cluster.shards) { // a removed shard drops out of the ranking
+        const g = chip(i, before.scores[i], from, y);
+        gsap.to(g, { opacity: 0, duration: .6, onComplete: () => g.remove() });
+      }
+      return userDot(svg, u, 'hrw', [-142, y]);
+    });
   }
 
   // ---- calls ----
@@ -504,15 +860,10 @@
     enqueue({ step: 'request', source: 'web', from: 'web', to: 'auth', title: `Login as ${user}`, sub: 'Web asks AuthService for a JWT.' });
     const r = await (await fetch(`/api/login/${encodeURIComponent(user)}`, { method: 'POST' })).json();
     token = r.token;
-    owner = shard = r.shard;
-    renderShards();
-    showSession();
     $('result').textContent = JSON.stringify(r, null, 2);
-    for (const id of instances) {
-      const i = +id.split('-')[1], owns = i === owner;
-      nodes[id].g.classList.toggle('owner', owns);
-      nodes[id].sub.textContent = owns ? `shard ${i} · owns ${user}` : `shard ${i}`;
-    }
+    const previous = cluster;
+    cluster = await (await fetch('/api/cluster')).json(); // now with this user in it
+    renderCluster(previous);
     // no reply event here: AuthService narrates its own reply, so it lands in the right place in the story
   }
 
