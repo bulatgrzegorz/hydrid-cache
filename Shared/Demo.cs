@@ -78,12 +78,15 @@ public static class Demo
             builder.AddTelemetry();
             builder.WebHost.ConfigureKestrel(k => k.ConfigureEndpointDefaults(e => e.Protocols = HttpProtocols.Http2)); // gRPC without TLS
             builder.Services.AddGrpc();
-            builder.Services.AddAuthentication().AddJwtBearer(o => o.TokenValidationParameters = new()
-            {
-                IssuerSigningKey = JwtKey,
-                ValidateIssuer = false,
-                ValidateAudience = false,
-            });
+            builder.Services
+                .AddAuthentication()
+                .AddJwtBearer(o => o.TokenValidationParameters = new() 
+                { 
+                    IssuerSigningKey = JwtKey, 
+                    ValidateIssuer = false, 
+                    ValidateAudience = false, 
+                });
+            
             builder.Services.AddAuthorization();
             builder.AddRabbitMQClient("rabbit");
             builder.AddRedisDistributedCache("redis");
@@ -117,23 +120,28 @@ public static class Demo
             var redis = app.Services.GetRequiredService<IConnectionMultiplexer>().GetDatabase();
             var timeline = app.Services.GetRequiredService<Timeline>();
             var channel = await app.Services.GetRequiredService<IConnection>().CreateChannelAsync();
+            
             await channel.ExchangeDeclareAsync(UserLoggedIn, ExchangeType.Fanout);
             // shortcut: throwaway queue per instance, logins while a shard is starting or down are lost. Use a durable queue per shard if that matters.
             var queue = await channel.QueueDeclareAsync();
             await channel.QueueBindAsync(queue.QueueName, UserLoggedIn, "");
+            
             var consumer = new AsyncEventingBasicConsumer(channel);
             consumer.ReceivedAsync += async (_, e) =>
             {
                 var (userId, userHome) = JsonSerializer.Deserialize<Login>(e.Body.Span)!;
-                var owner = (await Cluster.Load(redis)).OwnerOf(userId); // read on every login, the page can rescale any time
+                
+                var owner = (await Cluster.Load(redis)).OwnerOf(userId);
                 if (owner != shard)
                 {
                     timeline.Tell("fanout", $"Got UserLoggedIn({userId}), shard {owner} owns this user, ignoring", from: "rabbit", tone: "skip");
                     return;
                 }
+                
                 timeline.Tell("fanout", $"Got UserLoggedIn({userId}), my user, hydrating cache", from: "rabbit");
                 await hydrate(userId, userHome);
             };
+            
             await channel.BasicConsumeAsync(queue.QueueName, autoAck: true, consumer);
         }
 
@@ -146,26 +154,18 @@ public static class Demo
         // The offset is committed after the eviction, so whichever instance takes the feed over carries on from there.
         public async Task EvictOnChangeFeed(string service, string collection, string userField, Func<string, Task> evict)
         {
-            var (dbs, kafka) = (app.Services.GetRequiredService<HomeDatabase>(), app.Configuration.GetConnectionString("kafka"));
-            var (region, timeline) = (dbs.Region, app.Services.GetRequiredService<Timeline>());
+            var dbs = app.Services.GetRequiredService<HomeDatabase>();
+            var region = dbs.Region;
+            
+            var kafka = app.Configuration.GetConnectionString("kafka");
+            var timeline = app.Services.GetRequiredService<Timeline>();
+            
             // Debezium names a topic <region>.<database>.<collection>, and each database here is named after its one collection.
             var topics = dbs.Regions.Select(r => $"{r}.{collection}.{collection}").ToList();
+            
             // Created here rather than on Debezium's first change, so the consumer is already reading when that change comes. Every instance
             // tries; the first one wins.
-            using (var admin = new AdminClientBuilder(new AdminClientConfig { BootstrapServers = kafka }).Build())
-            {
-                try
-                {
-                    await admin.CreateTopicsAsync(topics.Select(t => new TopicSpecification
-                        { Name = t, NumPartitions = 1, ReplicationFactor = 1 }));
-                }
-                catch (CreateTopicsException e) when (e.Results.All(r =>
-                                                          r.Error.Code is ErrorCode.NoError
-                                                              or ErrorCode.TopicAlreadyExists))
-                {
-                
-                }
-            }
+            await WebApplication.CreateTopics(kafka, topics);
             
             var timeout = TimeSpan.FromSeconds(10);
             var consumer = new ConsumerBuilder<Ignore, string?>(new ConsumerConfig { BootstrapServers = kafka, GroupId = $"{region}-{service}", EnableAutoCommit = false })
@@ -195,30 +195,63 @@ public static class Demo
             {
                 try
                 {
-                    while (true)
+                    while (!stopping.IsCancellationRequested)
                     {
                         var change = consumer.Consume(stopping);
                         // The whole document as extended JSON; null for a delete, and the tombstone after it.
-                        var after = change.Message.Value is { } value ? JsonNode.Parse(value)!["after"]?.GetValue<string>() : null;
+                        var after = change.Message.Value is { } value
+                            ? JsonNode.Parse(value)!["after"]?.GetValue<string>()
+                            : null;
                         if (after is not null)
                         {
                             var doc = BsonDocument.Parse(after);
-                            var (userId, writer, source) = (doc[userField].AsString, doc.GetValue(WrittenBy, "").AsString, change.Topic.Split('.')[0]);
+                            var userId = doc.GetValue(userField).AsString;
+                            var writer = doc.GetValue(WrittenBy, "").AsString;
+                            var source =  change.Topic.Split('.')[0];
+                            
                             if (writer != region)
                             {
                                 // Debezium can't narrate, so the consumer tells its part.
-                                timeline.Tell("cdc-out", $"Change stream: {userId}'s {collection} changed in {source}'s MongoDB, publishing it to Kafka",
+                                timeline.Tell("cdc-out",
+                                    $"Change stream: {userId}'s {collection} changed in {source}'s MongoDB, publishing it to Kafka",
                                     from: $"{source}-mongo", to: "kafka", by: "kafka");
-                                timeline.Tell("cdc-in", $"Kafka: {writer} wrote {userId}'s {collection}, evicting the cached copy", from: "kafka");
+                                
+                                timeline.Tell("cdc-in",
+                                    $"Kafka: {writer} wrote {userId}'s {collection}, evicting the cached copy",
+                                    from: "kafka");
+                                
                                 await evict(userId);
                             }
                         }
-                        // A rebalance can take the partition first; its new owner then reads the change again and evicts twice, which is harmless.
-                        try { consumer.Commit(change); } catch (KafkaException) { }
+                        
+                        try
+                        {
+                            consumer.Commit(change);
+                        }
+                        catch (KafkaException)
+                        {
+                        }
                     }
                 }
-                catch (OperationCanceledException) { consumer.Close(); } // leaves the group now, so a restart doesn't wait out the old session
+                catch (OperationCanceledException)
+                {
+                    consumer.Close();
+                } // leaves the group now, so a restart doesn't wait out the old session
             }, stopping).ContinueWith(t => app.Logger.LogError(t.Exception, "Change feed on {Collection} stopped", collection), TaskContinuationOptions.OnlyOnFaulted);
+        }
+
+        private static async Task CreateTopics(string? kafka, List<string> topics)
+        {
+            using var admin = new AdminClientBuilder(new AdminClientConfig { BootstrapServers = kafka }).Build();
+            
+            try
+            {
+                await admin.CreateTopicsAsync(topics.Select(t => new TopicSpecification { Name = t, NumPartitions = 1, ReplicationFactor = 1 }));
+            }
+            catch (CreateTopicsException e) when (e.Results.All(r => r.Error.Code is ErrorCode.NoError or ErrorCode.TopicAlreadyExists))
+            {
+                //ignored, we just want them to be present
+            }
         }
     }
 }
