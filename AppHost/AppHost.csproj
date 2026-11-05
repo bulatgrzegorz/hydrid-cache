@@ -8,6 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Aspire.Hosting.Kafka" Version="13.6.3" />
     <PackageReference Include="Aspire.Hosting.MongoDB" Version="13.6.3" />
     <PackageReference Include="Aspire.Hosting.RabbitMQ" Version="13.6.3" />
     <PackageReference Include="Aspire.Hosting.Redis" Version="13.6.3" />

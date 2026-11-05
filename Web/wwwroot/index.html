@@ -14,7 +14,7 @@
     --bg: #111; --fg: #ececec; --muted: #8b8b8b; --line: #2b2b2b; --panel: #1c1c1c;
     --serif: "CMU Serif", "Latin Modern Roman", Charter, Georgia, serif;
     /* one color per component: its card, its lines, its buttons and its name in the log */
-    --web: #bbbbbb; --auth: #9a72ac; --rabbit: #ff862f; --account: #58c4dd; --order: #5cd0b3; --redis: #e65a4c; --mongo: #699c52;
+    --web: #bbbbbb; --auth: #9a72ac; --rabbit: #ff862f; --account: #58c4dd; --order: #5cd0b3; --redis: #e65a4c; --mongo: #699c52; --kafka: #dc75cd; --region: #c55f73;
     /* what happened: dots, flashes and highlights */
     --flow: #f7d96f; --hit: #83c167; --miss: #f0ac5f; --skip: #888888; --error: #fc6255;
     /* one color per shard in the hashing explainer, from the same Manim palette */
@@ -79,13 +79,21 @@
   #next { --c: var(--flow); }
   #next:disabled { opacity: .3; cursor: default; filter: none; }
 
-  #diagram { flex: none; width: 100%; height: 42vh; }
+  #diagram { flex: none; width: 100%; height: 46vh; }
   .edge { fill: none; stroke: var(--c); stroke-opacity: .4; stroke-width: 2; }
   .card { fill: color-mix(in srgb, var(--c) 12%, var(--bg)); stroke: color-mix(in srgb, var(--c) 50%, var(--bg)); stroke-width: 2; }
   .owner .card { stroke: var(--c); stroke-width: 3; }
   .title { font: 18px var(--serif); fill: var(--fg); }
   .sub { font: 14px var(--serif); fill: var(--muted); }
   .owner .sub { fill: var(--c); font-weight: 600; }
+  /* twelve instances across, so their boxes are narrower */
+  .instance .title { font-size: 14px; }
+  .instance .sub { font-size: 12px; }
+  /* one panel per region; the one your calls go to is outlined */
+  .region rect { fill: color-mix(in srgb, var(--fg) 2%, var(--bg)); stroke: var(--line); stroke-width: 2; stroke-dasharray: 8 8; }
+  .region text { font: 30px var(--serif); fill: var(--muted); }
+  .region.home rect { stroke: color-mix(in srgb, var(--region) 60%, var(--bg)); }
+  .region.home text { fill: var(--region); }
   .chip rect { fill: color-mix(in srgb, var(--c) 20%, var(--bg)); }
   .chip text { font: 700 11px system-ui, sans-serif; fill: var(--c); text-anchor: middle; }
   /* TTL countdowns, off until the Show TTL switch: the L1 chip drains like a battery */
@@ -96,6 +104,8 @@
   .standby .card { fill: none; stroke-dasharray: 6 6; }
   .standby .title { fill: var(--muted); }
   .edge.standby { stroke-opacity: .1; }
+  /* a line to another region's MongoDB never shows: only the hop's flash and dot do */
+  .edge.hop { visibility: hidden; }
 
   /* the bottom panel: tabs for the hashing explainer and the log */
   .tabs { display: flex; align-items: center; gap: 4px; padding: 6px 20px 0; border-top: 1px solid var(--line); font-size: 14px; }
@@ -147,6 +157,15 @@
 <body>
 <aside>
   <h1>Sharded hybrid cache</h1>
+
+  <!-- filled in by renderCluster -->
+  <section style="--c: var(--region)">
+    <h2>Region</h2>
+    <div class="group row"><div class="seg" id="region" style="flex: 1"></div></div>
+    <p class="note">Where your calls go. Each region runs the whole system, but a user's data lives only in the MongoDB of their
+      home region, where they first logged in. Anywhere else, a miss reads it from there and a write goes there,
+      and Debezium and Kafka tell the other regions to evict.</p>
+  </section>
 
   <section style="--c: var(--auth)">
     <h2>Log in</h2>
@@ -242,7 +261,7 @@
     <label class="stepper"><input type="checkbox" id="stepMode" onchange="if (!this.checked) advance?.()">Step by step</label>
     <button id="next" disabled onclick="advance?.()">Next step ▶</button>
   </div>
-  <svg id="diagram" viewBox="0 0 1000 560"><g id="edges"></g><g id="nodes"></g><g id="dots"></g></svg>
+  <svg id="diagram" viewBox="0 0 1600 600"><g id="regions"></g><g id="edges"></g><g id="nodes"></g><g id="dots"></g></svg>
   <div class="tabs" role="tablist">
     <button role="tab" id="tab-hashing" aria-controls="hashing" aria-selected="true" onclick="showTab('hashing')">Hashing</button>
     <button role="tab" id="tab-log" aria-controls="log" aria-selected="false" onclick="showTab('log')">Log</button>
@@ -282,9 +301,13 @@
   const $ = id => document.getElementById(id);
   const css = getComputedStyle(document.documentElement);
   const colorOf = tone => css.getPropertyValue(`--${tone || 'flow'}`);
-  const kindOf = id => id.split('-')[0]; // account-1 → account, the name of its color
-  const shardOf = id => +id.split('-')[1]; // account-1 → 1
-  const nodes = {}, edges = {};
+  // Every region is a whole copy of the system behind the one Web, so its boxes are named after it: eu-account-1, us-redis.
+  // home is the region your calls go to.
+  let regions = [], home;
+  const kindOf = id => id.split('-').at(regions.includes(id.split('-')[0]) ? 1 : 0); // eu-account-1 → account, the name of its color
+  const shardOf = id => +id.split('-').at(-1); // eu-account-1 → 1
+  const clusterOf = async region => (await fetch(`/api/cluster?region=${region}`)).json();
+  const nodes = {}, edges = {}, panels = {};
   let token = '', user, owner, shard = 0, shardCount = 0, instances = [];
   gsap.registerPlugin(MotionPathPlugin);
 
@@ -311,43 +334,74 @@
   }
 
   // Straight line between boxes side by side, vertical S-curve between rows. Colored by the infrastructure it talks to.
-  function edge(a, b, [x1, y1], [x2, y2]) {
-    const kind = ['rabbit', 'redis', 'mongo'].find(k => k === a || k === b) ?? kindOf(b), my = (y1 + y2) / 2;
+  function edge(a, b, [x1, y1], [x2, y2], cls = '') {
+    const kind = [a, b].map(kindOf).find(k => ['kafka', 'rabbit', 'redis', 'mongo'].includes(k)) ?? kindOf(b), my = (y1 + y2) / 2;
     const d = y1 === y2 ? `M${x1},${y1} L${x2},${y2}` : `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`;
-    edges[`${a}>${b}`] = el('path', { class: 'edge', d, style: `--c: var(--${kind})` }, $('edges'));
+    edges[`${a}>${b}`] = el('path', { class: `edge ${cls}`, d, style: `--c: var(--${kind})` }, $('edges'));
   }
 
   async function draw() {
-    [shardCount, durations, cluster] = await Promise.all(['/api/shards', '/api/ttl', '/api/cluster'].map(async url => (await fetch(url)).json()));
-    instances = ['account', 'order'].flatMap(s => Array.from({ length: shardCount }, (_, i) => `${s}-${i}`));
-    const n = instances.length, w = Math.min(190, 1000 / n - 30);
+    [shardCount, durations, regions] = await Promise.all(['/api/shards', '/api/ttl', '/api/regions'].map(async url => (await fetch(url)).json()));
+    home = regions[0];
+    const clusters = await Promise.all(regions.map(clusterOf));
+    cluster = clusters[0];
+    const n = 2 * shardCount, step = Math.min(150, 760 / n), w = step - 8; // instances per region, and their spacing
 
-    box('web', 170, 70, 'Web', 'backend for this page');
-    box('auth', 500, 70, 'AuthService', 'JWT · publishes logins');
-    box('rabbit', 830, 70, 'RabbitMQ', 'UserLoggedIn fanout');
-    instances.forEach((id, i) => {
-      const node = box(id, 1000 * (i + .5) / n, 280, id, `shard ${shardOf(id)}`, w);
-      node.chip = el('g', { class: 'chip', transform: `translate(${w / 2 - 44} -14)` }, node.g);
-      el('rect', { width: 30, height: 28, rx: 7 }, node.chip);
-      node.gauge = el('rect', { class: 'ttl gauge', width: 30, rx: 7 }, node.chip);
-      el('text', { x: 15, y: 18 }, node.chip).textContent = 'L1';
-      node.ttl = el('text', { class: 'ttl', x: 15, y: 40 }, node.chip);
+    box('web', 800, 42, 'Web', 'routes to your region');
+    regions.forEach((r, k) => {
+      // eu on the left, us on the right; inner points toward the middle, where Debezium · Kafka links them
+      const cx = 400 + 800 * k, inner = k ? -1 : 1, [authX, rabbitX, redisX, mongoX] = [cx + inner * 170, cx - inner * 170, cx - inner * 170, cx + inner * 150];
+      panels[r] = el('g', { class: 'region' }, $('regions'));
+      el('rect', { x: cx - 392, y: 88, width: 784, height: 506, rx: 22 }, panels[r]);
+      el('text', { x: cx - inner * 372, y: 124, 'text-anchor': k ? 'end' : 'start' }, panels[r]).textContent = r;
+
+      box(`${r}-auth`, authX, 158, 'AuthService', 'JWT · publishes logins', 180);
+      box(`${r}-rabbit`, rabbitX, 158, 'RabbitMQ', 'UserLoggedIn fanout', 180);
+      const ids = ['account', 'order'].flatMap(s => Array.from({ length: shardCount }, (_, i) => `${r}-${s}-${i}`));
+      ids.forEach((id, j) => {
+        const node = box(id, cx + (j - (n - 1) / 2) * step, 320, id.slice(r.length + 1), `shard ${shardOf(id)}`, w);
+        node.g.classList.add('instance');
+        node.chip = el('g', { class: 'chip', transform: `translate(${w / 2 - 38} -14)` }, node.g);
+        el('rect', { width: 30, height: 28, rx: 7 }, node.chip);
+        node.gauge = el('rect', { class: 'ttl gauge', width: 30, rx: 7 }, node.chip);
+        el('text', { x: 15, y: 18 }, node.chip).textContent = 'L1';
+        node.ttl = el('text', { class: 'ttl', x: 15, y: 40 }, node.chip);
+      });
+      instances.push(...ids);
+      box(`${r}-redis`, redisX, 520, 'Redis', 'L2 cache · backplane', 190); // after the instances, so the intro draws row by row
+      nodes[`${r}-redis`].ttl = el('text', { class: 'sub ttl', y: 54, 'text-anchor': 'middle' }, nodes[`${r}-redis`].g);
+      box(`${r}-mongo`, mongoX, 520, 'MongoDB', 'source of truth', 180);
+
+      edge('web', `${r}-auth`, [800 - inner * 80, 74], [authX, 126]);
+      edge(`${r}-auth`, `${r}-rabbit`, [authX - inner * 90, 158], [rabbitX + inner * 90, 158]);
+      edge(`${r}-mongo`, 'kafka', [mongoX + inner * 90, 520], [800 - inner * 85, 520]);
+      ids.forEach((id, j) => {
+        const { x } = nodes[id], spread = (j - (n - 1) / 2) * 14;
+        edge('web', id, [800 - inner * 40 + spread / 2, 74], [x - 25, 288]);
+        edge(`${r}-rabbit`, id, [rabbitX + spread, 190], [x + 25, 288]);
+        edge(id, `${r}-redis`, [x - 25, 352], [redisX + spread, 488]);
+        edge(id, `${r}-mongo`, [x + 25, 352], [mongoX + spread, 488]);
+      });
+      // An eviction reaches whichever instance Kafka gave the feed to, so these hops show only as the dot, like the cross-region ones.
+      for (const id of ids) edge('kafka', id, [800 + (nodes[id].x - 800) / 20, 488], [nodes[id].x, 352], 'hop');
+      markNodes(r, clusters[k]);
     });
-    box('redis', 330, 490, 'Redis', 'L2 cache · backplane'); // after the instances, so the intro draws row by row
-    nodes.redis.ttl = el('text', { class: 'sub ttl', y: 54, 'text-anchor': 'middle' }, nodes.redis.g);
-    box('mongo', 670, 490, 'MongoDB', 'source of truth');
-
-    edge('web', 'auth', [270, 70], [400, 70]);
-    edge('auth', 'rabbit', [600, 70], [730, 70]);
-    instances.forEach((id, i) => {
-      const { x } = nodes[id], spread = (i - (n - 1) / 2) * 24;
-      edge('web', id, [170 + spread, 102], [x - 30, 248]);
-      edge('rabbit', id, [830 + spread, 102], [x + 30, 248]);
-      edge(id, 'redis', [x - 30, 312], [330 + spread, 458]);
-      edge(id, 'mongo', [x + 30, 312], [670 + spread, 458]);
+    box('kafka', 800, 520, 'Debezium · Kafka', 'change feeds', 170);
+    // A call outside the user's home region reads and writes the home region's MongoDB.
+    regions.forEach((r, k) => {
+      for (const id of instances.filter(id => id.startsWith(`${r}-`)))
+        for (const o of regions.filter(o => o !== r)) edge(id, `${o}-mongo`, [nodes[id].x + 25, 352], [nodes[`${o}-mongo`].x + (k ? 50 : -50), 488], 'hop');
     });
     renderCluster();
     intro();
+  }
+
+  // The Region picker: your calls go to that region from now on. Your JWT works there too, since both regions trust the
+  // same signing key, but until you log in there no shard of that region has warmed your data.
+  async function travel(region) {
+    home = region;
+    cluster = await clusterOf(home);
+    renderCluster();
   }
 
   // Manim's Create: trace a stroke from its start to its end.
@@ -388,10 +442,10 @@
   const hit = s => s.every(e => e.tone === 'hit');
   // [title, one-line explanation] shown big above the diagram. prev is the step before, for L1 checks right after a backplane message.
   const steps = {
-    jwt: ['AuthService issues a JWT', 'Its sub claim carries the user id. Services read the user from the token, never from the request.'],
+    jwt: ['AuthService issues a JWT', 'Its claims carry the user id and their home region, where they first logged in. Services read both from the token, never from the request.'],
     publish: ['AuthService publishes UserLoggedIn', "Onto a RabbitMQ fanout exchange. Fire and forget: login doesn't wait for what happens next."],
     reply: s => s[0].tone === 'error' ? ['The call is rejected', `${s[0].text}. It never reached the cache.`]
-      : s[0].source === 'auth' ? ['AuthService replies with the JWT', 'Login is done. Warming the cache carries on in the background.']
+      : kindOf(s[0].source) === 'auth' ? ['AuthService replies with the JWT', 'Login is done. Warming the cache carries on in the background.']
       : [`${s[0].source} replies to Web`, 'The answer goes back to the page.'],
     fanout: ['RabbitMQ delivers UserLoggedIn to every instance', 'Each one checks which shard owns the user. The owner warms its cache, the others ignore it.'],
     l1: (s, prev) => prev === 'bp-receive'
@@ -403,9 +457,13 @@
     'db-read': ['Loading from MongoDB', 'The source of truth, only reached when both cache levels miss.'],
     save: ['Saving to L1 + L2', "Into this instance's memory, and into Redis for every other instance."],
     'bp-send': ['Backplane: announcing the change', 'A tiny Redis pub/sub message carrying just the key: "this changed".'],
-    'bp-receive': ['The other instances hear it', "If they hold a copy in L1 they refresh it from L2. If not, there's nothing to do."],
+    'bp-receive': ['The other instances hear it', "If they hold a copy in L1, they refresh it from L2, or drop it if the key was evicted. If not, there's nothing to do."],
     'db-write': ['Writing to MongoDB', 'The source of truth is updated first, then the cache.'],
     evict: ['L1 eviction: the TTL ran out', "The copy is gone from this instance's memory, so the next call here misses L1."],
+    'home-read': ["Loading from the home region's MongoDB", "The user's data lives only in their home region. The read crosses to its MongoDB and comes back with the value."],
+    'home-write': ["Writing to the home region's MongoDB", "Only the home region holds the user's data, and its change feed reports the write. Then this region saves the new value to its own L1 + L2."],
+    'cdc-out': ['Debezium hands the change to Kafka', "It reads that MongoDB's change stream, which reports a write only once the database has it. So the eviction that follows is never early."],
+    'cdc-in': ['One instance hears it from Kafka', "A service's instances in a region share one consumer group, and Kafka gives the feed to one of them. It evicts other regions' writes from L1 + L2, and the next read loads the new value."],
   };
 
   // ---- playing it, one scene per step ----
@@ -421,7 +479,11 @@
   let busy = false, advance = null, action = '', actionKind = 'web', stepNo = 0, prevStep = '';
 
   function enqueue(ev) {
-    queue.push(ev);
+    ev.region ??= home; // the page's own events happen where your calls go
+    // A sender narrates once its message is out, so its receiver can get here first: the send still plays first.
+    // A backplane message stays in its region.
+    const receive = ev.step === 'bp-send' ? queue.findIndex(e => e.step === 'bp-receive' && e.key === ev.key && e.region === ev.region) : -1;
+    receive < 0 ? queue.push(ev) : queue.splice(receive, 0, ev);
     if (!busy) { busy = true; setTimeout(run, 150); } // let a burst of events land before cutting the first scene
   }
 
@@ -491,12 +553,16 @@
     const c = colorOf(ev.tone), forward = edges[`${ev.from}>${ev.to}`], path = forward || edges[`${ev.to}>${ev.from}`];
     if (!path) return ev.to === 'l1' ? lightL1(nodes[ev.source].chip, c) : arrive(nodes[ev.to], c);
 
-    passingFlash(path, c, forward, 1);
+    // A home read is a round trip: out to the home region's MongoDB, then back with the value, so it starts and ends at ev.to.
+    const trip = ev.step === 'home-read', out = trip ? !forward : forward;
+    passingFlash(path, c, out, 1);
+    if (trip) gsap.delayedCall(1, () => passingFlash(path, c, !out, 1));
     const dot = el('circle', { r: 7, fill: c }, $('dots'));
     return gsap.to(dot, {
-      duration: 1, // same duration and ease as the flash, so its bright stretch stays glued behind the dot
+      duration: trip ? 2 : 1, // same duration and ease as the flash, so its bright stretch stays glued behind the dot, both ways
+      ease: trip ? thereAndBack : smooth,
       immediateRender: true, // place it on the path now, or it shows for a frame at the corner of the svg
-      motionPath: { path, align: path, alignOrigin: [.5, .5], start: forward ? 0 : 1, end: forward ? 1 : 0 },
+      motionPath: { path, align: path, alignOrigin: [.5, .5], start: out ? 0 : 1, end: out ? 1 : 0 },
     }).then(() => { dot.remove(); arrive(nodes[ev.to], c); });
   }
 
@@ -555,13 +621,13 @@
   // ---- TTL: how long each cached copy of the logged-in user's data has left ----
 
   let durations; // { l1, l2 } in seconds, from /api/ttl
-  const ttls = {}; // `${where} ${key}` → when it expires, in ms; where is an instance id or 'redis'
+  const ttls = {}; // `${where} ${key}` → when it expires, in ms; where is an instance id or a region's redis
   const keyOf = kind => `${kind === 'order' ? 'orders' : kind}:${user}`; // the keys the services cache under
 
   // Follows the story: a save starts the L1 and L2 clocks. An L2 hit copies into L1 for the L1 TTL, but never past
   // Redis' own expiry (FusionCache keeps that on the copy). An L1 miss or an eviction means this instance holds no copy.
-  function trackTtl({ step, source, key, tone, at }) {
-    const l1 = `${source} ${key}`, l2 = `redis ${key}`;
+  function trackTtl({ step, source, key, tone, at, region }) {
+    const l1 = `${source} ${key}`, l2 = `${region}-redis ${key}`;
     if (step === 'save') [ttls[l1], ttls[l2]] = [at + durations.l1 * 1000, at + durations.l2 * 1000];
     else if (step === 'l2' && tone === 'hit') ttls[l1] = Math.min(at + durations.l1 * 1000, ttls[l2] ?? Infinity);
     else if (step === 'l2') delete ttls[l2];
@@ -579,8 +645,10 @@
       ttl.style.fill = t && !secs(t) ? 'var(--miss)' : ''; // expired, still in memory until the sweep or a read evicts it
     }
     // Redis drops an expired key itself, right on time, so its countdown just disappears.
-    nodes.redis.ttl.textContent = ['account', 'order'].map(keyOf).filter(k => ttls[`redis ${k}`] && secs(ttls[`redis ${k}`]))
-      .map(k => `${k} ${secs(ttls[`redis ${k}`])}s`).join(' · ');
+    for (const r of regions) {
+      const l2 = k => ttls[`${r}-redis ${k}`];
+      nodes[`${r}-redis`].ttl.textContent = ['account', 'order'].map(keyOf).filter(k => l2(k) && secs(l2(k))).map(k => `${k} ${secs(l2(k))}s`).join(' · ');
+    }
   }
 
   // ---- the cluster: how many shards are in, and which strategy maps users onto them ----
@@ -598,23 +666,31 @@
       (_, i) => segButton(`${i + 1}`, i + 1 === cluster.shards, () => changeCluster({ shards: i + 1 }))));
     $('routing').replaceChildren(...Object.entries(strategies).map(
       ([s, name]) => segButton(name, s === cluster.strategy, () => changeCluster({ strategy: s }))));
-    for (const id of instances) {
-      const i = shardOf(id), owns = i === owner, standby = i >= cluster.shards;
-      nodes[id].g.classList.toggle('owner', owns);
-      nodes[id].g.classList.toggle('standby', standby);
-      nodes[id].sub.textContent = standby ? 'standby' : owns ? `owns ${user}` : `shard ${i}`; // short, the boxes get narrow
-      for (const e of [`web>${id}`, `rabbit>${id}`, `${id}>redis`, `${id}>mongo`]) edges[e].classList.toggle('standby', standby);
-    }
+    $('region').replaceChildren(...regions.map(r => segButton(r, r === home, () => r !== home && travel(r))));
+    for (const r of regions) panels[r].classList.toggle('home', r === home);
+    markNodes(home, cluster);
     renderShards();
     if (user) showSession();
     drawHashing(previous);
+  }
+
+  // A region's boxes for its cluster: which shards are in, which wait on standby, and which owns the user.
+  function markNodes(region, c) {
+    const ownerShard = c.users.find(u => u.id === user)?.owners[c.strategy];
+    for (const id of instances.filter(id => id.startsWith(`${region}-`))) {
+      const i = shardOf(id), owns = i === ownerShard, standby = i >= c.shards;
+      nodes[id].g.classList.toggle('owner', owns);
+      nodes[id].g.classList.toggle('standby', standby);
+      nodes[id].sub.textContent = standby ? 'standby' : owns ? `owns ${user}` : `shard ${i}`; // short, the boxes get narrow
+      for (const e of [`web>${id}`, `${region}-rabbit>${id}`, `${id}>${region}-redis`, `${id}>${region}-mongo`]) edges[e].classList.toggle('standby', standby);
+    }
   }
 
   // A change plays as its own action: the instances joining or leaving light up, and the subtitle counts the users
   // that get a new owner. Their first call there misses L1, and Redis (L2) answers it.
   async function changeCluster(change) {
     if (change.shards === cluster.shards || change.strategy === cluster.strategy) return;
-    const res = await fetch(`/api/cluster?${new URLSearchParams(change)}`, { method: 'POST' });
+    const res = await fetch(`/api/cluster?${new URLSearchParams({ region: home, ...change })}`, { method: 'POST' });
     if (!res.ok) return;
     const previous = cluster;
     cluster = await res.json();
@@ -629,7 +705,7 @@
       const title = `Scale ${cluster.shards > previous.shards ? 'out' : 'in'} to ${cluster.shards} shards`;
       const others = Object.keys(strategies).filter(s => s !== cluster.strategy).map(s => `${strategies[s]} ${moved(s, s)}`).join(', ');
       const sub = `Routing by ${strategies[cluster.strategy]}: ${moved(cluster.strategy, cluster.strategy)} ${of} get a new owner (${others}).`;
-      for (const id of instances.filter(id => shardOf(id) >= lo && shardOf(id) < hi))
+      for (const id of instances.filter(id => id.startsWith(`${home}-`) && shardOf(id) >= lo && shardOf(id) < hi))
         enqueue({ step: 'request', source: id, from: id, to: id, title, sub });
     }
     renderCluster(previous);
@@ -852,17 +928,19 @@
   function showSession() {
     const name = document.createElement('b');
     name.textContent = user;
-    $('who').replaceChildren('Logged in as ', name, `. Their data is kept warm on shard ${owner}.`);
+    $('who').replaceChildren('Logged in as ', name, owner === undefined
+      ? `, but not in ${home}: no shard here has warmed their data. Log in again to warm it.`
+      : `. Their data is kept warm on shard ${owner} in ${home}.`);
   }
 
   async function login() {
     user = $('user').value;
-    enqueue({ step: 'request', source: 'web', from: 'web', to: 'auth', title: `Login as ${user}`, sub: 'Web asks AuthService for a JWT.' });
-    const r = await (await fetch(`/api/login/${encodeURIComponent(user)}`, { method: 'POST' })).json();
+    enqueue({ step: 'request', source: 'web', from: 'web', to: `${home}-auth`, title: `Login as ${user} in ${home}`, sub: `Web asks ${home}'s AuthService for a JWT.` });
+    const r = await (await fetch(`/api/login/${encodeURIComponent(user)}?region=${home}`, { method: 'POST' })).json();
     token = r.token;
     $('result').textContent = JSON.stringify(r, null, 2);
     const previous = cluster;
-    cluster = await (await fetch('/api/cluster')).json(); // now with this user in it
+    cluster = await clusterOf(home); // now with this user in it
     renderCluster(previous);
     // no reply event here: AuthService narrates its own reply, so it lands in the right place in the story
   }
@@ -871,13 +949,14 @@
   const reply = ev => setTimeout(() => enqueue(ev), 200);
 
   async function call(rpc, method, service, body) {
-    const target = `${service}-${shard}`, wrong = token && shard !== owner;
+    const target = `${home}-${service}-${shard}`, cold = token && owner === undefined, wrong = token && !cold && shard !== owner;
     const sub = !token ? 'No JWT yet: log in first.'
+      : cold ? `${user} never logged in to ${home}, so no shard here has warmed their data. The JWT still works: both regions trust its signing key.`
       : wrong ? `${user} lives on shard ${owner}. This instance can still answer, but it's not where ${user}'s data is kept warm.`
       : `${target} owns ${user}, so this is where ${user}'s data is kept warm.`;
     enqueue({ step: 'request', source: 'web', from: 'web', to: target, tone: wrong ? 'miss' : null,
               title: `${rpc} → ${target}` + (token ? ` as ${user}` : ''), sub });
-    const res = await fetch(`/api/${service}?shard=${shard}`, {
+    const res = await fetch(`/api/${service}?region=${home}&shard=${shard}`, {
       method, body: body && JSON.stringify(body),
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     });
@@ -888,8 +967,16 @@
   }
 
   draw().then(() => {
-    // at: when it really happened, so the TTL clock stays true however slowly the story plays
-    new EventSource('/api/timeline').onmessage = e => enqueue({ ...JSON.parse(e.data), at: Date.now() });
+    // Each region narrates on its own Redis, naming its own infrastructure plainly (redis, mongo); the page puts the region in front.
+    // The rest is named in full already (eu-account-0, us-mongo, kafka, web), or is l1, the instance's own memory.
+    // at: when it really happened, so the TTL clock stays true however slowly the story plays.
+    for (const region of regions) {
+      const named = id => nodes[`${region}-${id}`] ? `${region}-${id}` : id;
+      new EventSource(`/api/timeline?region=${region}`).onmessage = e => {
+        const ev = JSON.parse(e.data);
+        enqueue({ ...ev, source: named(ev.source), from: named(ev.from), to: named(ev.to), region, at: Date.now() });
+      };
+    }
     setInterval(showTtl, 250);
   });
 </script>
